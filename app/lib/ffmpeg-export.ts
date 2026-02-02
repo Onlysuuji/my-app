@@ -4,6 +4,8 @@ type ExportOptions = {
   file: File;
   playbackRate: number; // 例: 1.0, 0.75, 1.25
   offsetSec: number;    // +で遅らせる / -で早める
+  trimStartSec?: number | null;
+  trimEndSec?: number | null;
   onProgress?: (progress: number) => void;
 };
 
@@ -103,13 +105,19 @@ function toArrayBuffer(data: Uint8Array) {
 }
 
 export async function exportVideoWithOffset(options: ExportOptions) {
-  const { file, playbackRate, offsetSec, onProgress } = options;
+  const { file, playbackRate, offsetSec, trimStartSec, trimEndSec, onProgress } = options;
 
   const rate = clampRate(playbackRate);
   const offset = Number.isFinite(offsetSec) ? offsetSec : 0;
+  const hasTrim =
+    Number.isFinite(trimStartSec) &&
+    Number.isFinite(trimEndSec) &&
+    (trimStartSec as number) < (trimEndSec as number);
+  const trimStart = hasTrim ? (trimStartSec as number) : 0;
+  const trimEnd = hasTrim ? (trimEndSec as number) : 0;
 
   // 1) 変換不要なら即返す（最速）
-  if (Math.abs(rate - 1.0) < 1e-6 && Math.abs(offset) < 1e-6) {
+  if (Math.abs(rate - 1.0) < 1e-6 && Math.abs(offset) < 1e-6 && !hasTrim) {
     return file; // FileはBlob互換
   }
 
@@ -135,7 +143,7 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   }
 
   // 3) offsetだけ（rate=1）の場合：まず -c copy を試す（爆速）
-  if (Math.abs(rate - 1.0) < 1e-6 && Math.abs(offset) > 1e-6) {
+  if (Math.abs(rate - 1.0) < 1e-6 && Math.abs(offset) > 1e-6 && !hasTrim) {
     try {
       const o = offset.toFixed(3);
 
@@ -167,10 +175,18 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   // 4) 速度変更あり or copy失敗：フィルタで再エンコード
   // video: setpts + 720pスケール + fps少し制限（軽くする）
   const scale720p = buildScaleTo720p();
-  const videoFilter = `setpts=PTS/${rate},${scale720p},fps=30`;
+  const videoParts: string[] = [];
+  if (hasTrim) {
+    videoParts.push(`trim=start=${trimStart}:end=${trimEnd}`, "setpts=PTS-STARTPTS");
+  }
+  videoParts.push(`setpts=PTS/${rate}`, scale720p, "fps=30");
+  const videoFilter = videoParts.join(",");
 
   // audio: offset処理 → atempo
   const audioFilters: string[] = [];
+  if (hasTrim) {
+    audioFilters.push(`atrim=start=${trimStart}:end=${trimEnd}`, "asetpts=PTS-STARTPTS");
+  }
   if (offset > 0) {
     const ms = Math.round(offset * 1000);
     audioFilters.push(`adelay=${ms}|${ms}`);

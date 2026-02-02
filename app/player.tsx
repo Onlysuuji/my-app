@@ -23,6 +23,8 @@ export default function Player() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportError, setExportError] = useState<string | null>(null);
   const [ffmpegReady, setFfmpegReady] = useState(false);
+  const [trimStartSec, setTrimStartSec] = useState<number | null>(null);
+  const [trimEndSec, setTrimEndSec] = useState<number | null>(null);
 
   // WebAudio
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -108,6 +110,8 @@ export default function Player() {
         file: sourceFile,
         playbackRate,
         offsetSec,
+        trimStartSec,
+        trimEndSec,
         onProgress: (p) => setExportProgress(p),
       });
 
@@ -427,6 +431,51 @@ export default function Player() {
               {exportError}
             </pre>
           )}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span>範囲:</span>
+          <span>
+            {trimStartSec !== null ? trimStartSec.toFixed(3) : "--"} ~{" "}
+            {trimEndSec !== null ? trimEndSec.toFixed(3) : "--"}
+          </span>
+          <button
+            type="button"
+            disabled={!srcUrl}
+            onClick={() => {
+              const v = videoRef.current;
+              if (!v) return;
+              setTrimStartSec(v.currentTime);
+            }}
+          >
+            始点を現在位置に設定
+          </button>
+          <button
+            type="button"
+            disabled={!srcUrl}
+            onClick={() => {
+              const v = videoRef.current;
+              if (!v) return;
+              setTrimEndSec(v.currentTime);
+            }}
+          >
+            終点を現在位置に設定
+          </button>
+          <button
+            type="button"
+            disabled={!srcUrl}
+            onClick={() => {
+              setTrimStartSec(null);
+              setTrimEndSec(null);
+            }}
+          >
+            クリア
+          </button>
+          {trimStartSec !== null &&
+            trimEndSec !== null &&
+            trimStartSec >= trimEndSec && (
+              <span style={{ color: "#b00" }}>始点は終点より前にしてください</span>
+            )}
         </div>
       </div>
 
