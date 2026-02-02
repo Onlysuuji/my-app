@@ -123,7 +123,7 @@ export async function exportVideoWithOffset(options: ExportOptions) {
 
   // 2) キャッシュキー（同一ファイル×条件なら使い回す）
   // ※ file.lastModified はブラウザ次第で変わることがあるが、軽い用途としては十分
-  const cacheKey = `${file.name}:${file.size}:${file.lastModified}:r=${rate}:o=${offset}`;
+  const cacheKey = `${file.name}:${file.size}:${file.lastModified}:r=${rate}:o=${offset}:ts=${trimStart}:te=${trimEnd}`;
   const cached = exportCache.get(cacheKey);
   if (cached) return cached;
 
@@ -143,17 +143,30 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   }
 
   // 3) offsetだけ（rate=1）の場合：まず -c copy を試す（爆速）
+  // 3-b) offsetだけ（rate=1）で copy が失敗した場合：
+  //      動画は copy、音声だけ再エンコード（かなり速い）
   if (Math.abs(rate - 1.0) < 1e-6 && Math.abs(offset) > 1e-6 && !hasTrim) {
-    try {
-      const o = offset.toFixed(3);
+    const audioFilters: string[] = [];
+    if (offset > 0) {
+      const ms = Math.round(offset * 1000);
+      audioFilters.push(`adelay=${ms}|${ms}`);
+    } else {
+      const abs = Math.abs(offset);
+      audioFilters.push(`atrim=start=${abs}`, "asetpts=PTS-STARTPTS");
+    }
+    const aFilter = audioFilters.join(",");
 
+    try {
       await ffmpeg.exec([
         "-i", inputName,
-        "-itsoffset", o, "-i", inputName,
+        "-filter_complex", `[0:a]${aFilter}[a]`,
         "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-c", "copy",
+        "-map", "[a]",
+        "-c:v", "copy",          // ← 動画はコピー
+        "-c:a", "aac",
+        "-b:a", "128k",
         "-movflags", "+faststart",
+        "-shortest",
         outputName,
       ]);
 
@@ -162,15 +175,15 @@ export async function exportVideoWithOffset(options: ExportOptions) {
       const blob = new Blob([ab], { type: "video/mp4" });
       exportCache.set(cacheKey, blob);
 
-      // 後片付け（あれば）
-      await ffmpeg.deleteFile?.(inputName).catch(() => {});
-      await ffmpeg.deleteFile?.(outputName).catch(() => {});
+      await ffmpeg.deleteFile?.(inputName).catch(() => { });
+      await ffmpeg.deleteFile?.(outputName).catch(() => { });
 
       return blob;
     } catch {
-      // copyが通らないケースがあるので、下の「再エンコード」にフォールバック
+      // ここで失敗したら最終手段として下の「全部再エンコード」へ
     }
   }
+
 
   // 4) 速度変更あり or copy失敗：フィルタで再エンコード
   // video: setpts + 720pスケール + fps少し制限（軽くする）
@@ -232,8 +245,8 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   exportCache.set(cacheKey, blob);
 
   // 後片付け
-  await ffmpeg.deleteFile?.(inputName).catch(() => {});
-  await ffmpeg.deleteFile?.(outputName).catch(() => {});
+  await ffmpeg.deleteFile?.(inputName).catch(() => { });
+  await ffmpeg.deleteFile?.(outputName).catch(() => { });
 
   return blob;
 }
