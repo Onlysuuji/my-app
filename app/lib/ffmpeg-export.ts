@@ -96,6 +96,12 @@ function clampRate(rate: number) {
   return rate;
 }
 
+function toArrayBuffer(data: Uint8Array) {
+  const copy = new Uint8Array(data.length);
+  copy.set(data);
+  return copy.buffer as ArrayBuffer;
+}
+
 export async function exportVideoWithOffset(options: ExportOptions) {
   const { file, playbackRate, offsetSec, onProgress } = options;
 
@@ -144,7 +150,8 @@ export async function exportVideoWithOffset(options: ExportOptions) {
       ]);
 
       const data = await ffmpeg.readFile(outputName);
-      const blob = new Blob([data], { type: "video/mp4" });
+      const ab = toArrayBuffer(new Uint8Array(data as Uint8Array));
+      const blob = new Blob([ab], { type: "video/mp4" });
       exportCache.set(cacheKey, blob);
 
       // 後片付け（あれば）
@@ -204,7 +211,8 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   }
 
   const data = await ffmpeg.readFile(outputName);
-  const blob = new Blob([data], { type: "video/mp4" });
+  const ab = toArrayBuffer(new Uint8Array(data as Uint8Array));
+  const blob = new Blob([ab], { type: "video/mp4" });
   exportCache.set(cacheKey, blob);
 
   // 後片付け
