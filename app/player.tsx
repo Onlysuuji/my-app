@@ -1,28 +1,32 @@
-"use client";
+﻿"use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import Script from "next/script";
+import { exportVideoWithOffset } from "./lib/ffmpeg-export";
 
-type SyncMode = "delayNode" | "seekSync"; 
-// delayNode: +方向に強い / seekSync: -方向も含めて同期で吸収
+// 同期方式は seekSync のみ使用
 
 export default function Player() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const [srcUrl, setSrcUrl] = useState<string | null>(null);
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [playing, setPlaying] = useState(false);
 
-  // オフセット（秒）：+なら音声を遅らせる、-なら音声を早める
+  // 音声オフセット（+で遅延 / -で前進）
   const [offsetSec, setOffsetSec] = useState(0);
 
   const [playbackRate, setPlaybackRate] = useState(1.0);
-  const [syncMode, setSyncMode] = useState<SyncMode>("seekSync");
   const [debugText, setDebugText] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [ffmpegReady, setFfmpegReady] = useState(false);
 
   // WebAudio
   const audioCtxRef = useRef<AudioContext | null>(null);
   const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
-  const delayNodeRef = useRef<DelayNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
 
   // 同期ループ
@@ -35,12 +39,13 @@ export default function Player() {
   const onPickFile = (file: File | null) => {
     if (!file) return;
 
-    // 以前のURL解放
+    // 既存の objectURL を破棄
     if (urlForCleanup.current) URL.revokeObjectURL(urlForCleanup.current);
 
     const url = URL.createObjectURL(file);
     urlForCleanup.current = url;
     setSrcUrl(url);
+    setSourceFile(file);
     setPlaying(false);
   };
 
@@ -54,28 +59,26 @@ export default function Player() {
     }
     const ctx = audioCtxRef.current;
 
-    // Safari等で必要：ユーザー操作後にresume
+    // Safari などで AudioContext が止まっている場合は resume
     if (ctx.state === "suspended") {
       await ctx.resume();
     }
 
     if (!mediaSourceRef.current) {
-      // crossOrigin が必要な場合あり（ObjectURLなら通常OK）
+      // objectURL なので crossOrigin は不要
       // audioEl.crossOrigin = "anonymous";
       mediaSourceRef.current = ctx.createMediaElementSource(audioEl);
 
-      delayNodeRef.current = ctx.createDelay(5.0); // 最大5秒遅延可能
       gainRef.current = ctx.createGain();
       gainRef.current.gain.value = 1.0;
 
-      // 経路：audioEl -> delay -> gain -> destination
-      mediaSourceRef.current.connect(delayNodeRef.current);
-      delayNodeRef.current.connect(gainRef.current);
+      // audioEl -> gain -> destination
+      mediaSourceRef.current.connect(gainRef.current);
       gainRef.current.connect(ctx.destination);
     }
   };
 
-  // 再生/停止
+  // 再生/一時停止
   const play = async () => {
     const v = videoRef.current;
     const a = audioRef.current;
@@ -83,18 +86,15 @@ export default function Player() {
 
     await ensureAudioGraph();
 
-    // 映像は無音で
+    // video 側はミュート
     v.muted = true;
 
-    // 再生速度合わせる
+    // 再生速度を揃える
     v.playbackRate = playbackRate;
     a.playbackRate = playbackRate;
 
-    // 最初に時刻合わせ
-    // 目標：audioTime = videoTime - offsetSec
-    // offsetSec=+0.2 → 音声は遅れる → audioTime = videoTime - 0.2
-    // offsetSec=-0.2 → 音声は早い → audioTime = videoTime + 0.2
-    const baseOffset = syncMode === "delayNode" && offsetSec > 0 ? 0 : offsetSec;
+    // audioTime = videoTime - offsetSec
+    const baseOffset = offsetSec;
     const targetAudioTime = clamp(v.currentTime - baseOffset, 0, a.duration || Infinity);
     safeSetCurrentTime(a, targetAudioTime);
 
@@ -111,7 +111,40 @@ export default function Player() {
     setPlaying(false);
   };
 
-  // 動画側の controls から再生された場合の同期開始
+  const onExport = async () => {
+    if (!sourceFile || exporting) return;
+    if (!ffmpegReady) {
+      setExportError("FFmpeg の読み込み中です。少し待って再度お試しください。");
+      return;
+    }
+    setExportError(null);
+    setExportProgress(0);
+    setExporting(true);
+    try {
+      const blob = await exportVideoWithOffset({
+        file: sourceFile,
+        playbackRate,
+        offsetSec,
+        onProgress: (p) => setExportProgress(p),
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "exported.mp4";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : String(err ?? "export failed");
+      // eslint-disable-next-line no-console
+      console.error("export failed:", err);
+      setExportError(message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // 動画の controls から再生された場合の同期開始
   const startFromVideo = async () => {
     const v = videoRef.current;
     const a = audioRef.current;
@@ -130,29 +163,17 @@ export default function Player() {
     setPlaying(true);
   };
 
-  // オフセット反映
+  // seekSync: スライダー操作直後に一度シーク
   useEffect(() => {
-    const delayNode = delayNodeRef.current;
-    if (!delayNode) return;
-
-    // delayNode は「遅らせる」専用。+ならここで処理。
-    // -の場合は delayNode では表現できないので同期ループで吸収。
-    const delay = syncMode === "delayNode" && offsetSec > 0 ? offsetSec : 0;
-    delayNode.delayTime.setTargetAtTime(delay, audioCtxRef.current?.currentTime ?? 0, 0.01);
-  }, [offsetSec, syncMode]);
-
-  // seekSync: スライダー操作直後に一度シークして反映
-  useEffect(() => {
-    if (syncMode !== "seekSync") return;
     if (!playing) return;
     const v = videoRef.current;
     const a = audioRef.current;
     if (!v || !a) return;
-    const baseOffset = syncMode === "delayNode" && offsetSec > 0 ? 0 : offsetSec;
+    const baseOffset = offsetSec;
     safeSetCurrentTime(a, clamp(v.currentTime - baseOffset, 0, a.duration || Infinity));
-  }, [offsetSec, syncMode, playing]);
+  }, [offsetSec, playing]);
 
-  // 速度反映
+  // 再生速度反映
   useEffect(() => {
     const v = videoRef.current;
     const a = audioRef.current;
@@ -161,7 +182,7 @@ export default function Player() {
     a.playbackRate = playbackRate;
   }, [playbackRate]);
 
-  // 同期ループ（重要）
+  // 同期ループ
   useEffect(() => {
     if (!playing) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -174,30 +195,22 @@ export default function Player() {
     if (!v || !a) return;
 
     const tick = () => {
-      // 目標：audioTime = videoTime - offsetSec
-      // ただし offsetSec>0 の遅延は DelayNode が担当してるので、seekSyncは主に(-)や微調整担当
+      // audioTime = videoTime - offsetSec
       const videoTime = v.currentTime;
-      const baseOffset = syncMode === "delayNode" && offsetSec > 0 ? 0 : offsetSec;
+      const baseOffset = offsetSec;
       const expectedAudio = videoTime - baseOffset;
 
-      // audio要素の「内部時刻」はDelayNodeで遅延しても currentTime には反映されない。
-      // なので、「+方向はDelayNodeに任せる」場合、expectedAudioはそのまま使うとズレる。
-      // ここでは syncMode=seekSync のときだけ強めに追従させる（-方向対応の主目的）
-      if (syncMode === "seekSync") {
-        const diff = (a.currentTime - expectedAudio);
+      const diff = (a.currentTime - expectedAudio);
 
-        // 大きくズレたらジャンプ補正
+      // 大きくズレたらジャンプで再同期
         if (Math.abs(diff) > 0.15) {
           safeSetCurrentTime(a, clamp(expectedAudio, 0, a.duration || Infinity));
         } else {
-          // 小さいズレは playbackRate を微調整して吸収（耳障りになりにくい）
-          // diff>0: 音声が進んでる→少し遅くする
-          // diff<0: 音声が遅れてる→少し速くする
-          const k = 0.25; // 追従の強さ
+        // 小さいズレは playbackRate を微調整して吸収
+        const k = 0.25; // 追従の強さ
           const rate = clamp(1.0 - diff * k, 0.95, 1.05) * playbackRate;
           a.playbackRate = rate;
         }
-      }
 
       const now = performance.now();
       if (now - lastDebugAtRef.current > 250) {
@@ -216,18 +229,18 @@ export default function Player() {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     };
-  }, [playing, offsetSec, syncMode, playbackRate]);
+  }, [playing, offsetSec, playbackRate]);
 
-  // シーク時：音声も追従
+  // シーク時の追従
   const onVideoSeeked = () => {
     const v = videoRef.current;
     const a = audioRef.current;
     if (!v || !a) return;
-    const baseOffset = syncMode === "delayNode" && offsetSec > 0 ? 0 : offsetSec;
+    const baseOffset = offsetSec;
     safeSetCurrentTime(a, clamp(v.currentTime - baseOffset, 0, a.duration || Infinity));
   };
 
-  // src URL が変わったらリセット
+  // src URL 更新
   useEffect(() => {
     const v = videoRef.current;
     const a = audioRef.current;
@@ -242,19 +255,20 @@ export default function Player() {
     return () => {};
   }, [srcUrl]);
 
-  // アンマウント時の後処理
+  // アンマウント時の後始末
   useEffect(() => {
     return () => {
       if (urlForCleanup.current) URL.revokeObjectURL(urlForCleanup.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
 
-      // AudioContext閉じる（任意）
+      // AudioContext を閉じる（任意）
       audioCtxRef.current?.close().catch(() => {});
     };
   }, []);
 
   return (
     <div style={{ display: "grid", gap: 12, maxWidth: 900 }}>
+      <Script src="/ffmpeg/ffmpeg.js" strategy="afterInteractive" onLoad={() => setFfmpegReady(true)} />
       <input
         type="file"
         accept="video/mp4"
@@ -262,7 +276,7 @@ export default function Player() {
       />
 
       <div style={{ display: "grid", gap: 8 }}>
-        <video
+        <video muted
           ref={videoRef}
           controls
           style={{ width: "100%", background: "#000" }}
@@ -271,57 +285,89 @@ export default function Player() {
           onPause={pause}
           onEnded={pause}
         />
-        {/* 音声はUI上見せなくても良いが、デバッグ用に controls 付けてもOK */}
+        {/* 音声は UI を出さずに使う */}
         <audio ref={audioRef} style={{ width: "100%" }} />
       </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        {!playing ? (
-          <button onClick={play} disabled={!srcUrl}>再生</button>
-        ) : (
-          <button onClick={pause}>停止</button>
-        )}
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span>再生速度:</span>
+          <span>{playbackRate.toFixed(2)}x</span>
+          <button
+            type="button"
+            onClick={() => setPlaybackRate((r) => clamp(r - 0.05, 0.1, 2.0))}
+            disabled={!srcUrl}
+          >
+            -
+          </button>
+          <input
+            type="range"
+            min={0.1}
+            max={2.0}
+            step={0.05}
+            value={playbackRate}
+            onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
+            disabled={!srcUrl}
+            style={{ flex: 1, minWidth: 260, height: 28 }}
+          />
+          <button
+            type="button"
+            onClick={() => setPlaybackRate((r) => clamp(r + 0.05, 0.1, 2.0))}
+            disabled={!srcUrl}
+          >
+            +
+          </button>
+        </div>
 
-        <span>速度:</span>
-        <span>Playback: {playbackRate.toFixed(2)}x</span>
-        <input
-          type="range"
-          min={0.1}
-          max={2.0}
-          step={0.05}
-          value={playbackRate}
-          onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
-          disabled={!srcUrl}
-        />
-
-        <span style={{ marginLeft: 12 }}>同期方式:</span>
-        <select value={syncMode} onChange={(e) => setSyncMode(e.target.value as SyncMode)}>
-          <option value="seekSync">seek同期（-も対応）</option>
-          <option value="delayNode">DelayNode中心（+向き）</option>
-        </select>
-      </div>
-
-      <div style={{ display: "grid", gap: 6 }}>
-        <label>
-          音声オフセット: {offsetSec.toFixed(3)} 秒（+で遅延 / -で前進）
-        </label>
-        <input
-          type="range"
-          min={-1.0}
-          max={1.0}
-          step={0.005}
-          value={offsetSec}
-          onChange={(e) => setOffsetSec(parseFloat(e.target.value))}
-          disabled={!srcUrl}
-        />
+        <div style={{ display: "grid", gap: 6 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span>音声オフセット: {offsetSec.toFixed(3)} 秒（+で遅延 / -で前進）</span>
+          <button
+            type="button"
+            onClick={() => setOffsetSec((v) => clamp(v - 0.005, -1.0, 1.0))}
+            disabled={!srcUrl}
+          >
+            -
+          </button>
+          <input
+            type="range"
+            min={-1.0}
+            max={1.0}
+            step={0.005}
+            value={offsetSec}
+            onChange={(e) => setOffsetSec(parseFloat(e.target.value))}
+            disabled={!srcUrl}
+            style={{ flex: 1, minWidth: 260, height: 28 }}
+          />
+          <button
+            type="button"
+            onClick={() => setOffsetSec((v) => clamp(v + 0.005, -1.0, 1.0))}
+            disabled={!srcUrl}
+          >
+            +
+          </button>
+        </div>
         <pre style={{ margin: 0, fontSize: 12, color: "#444" }}>{debugText}</pre>
       </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={onExport} disabled={!srcUrl || exporting}>
+            {exporting ? "書き出し中…" : "書き出し（速度/オフセット反映）"}
+          </button>
+          {exporting && <span>{Math.round(exportProgress * 100)}%</span>}
+          {exportError && (
+            <pre style={{ color: "#b00", margin: 0, whiteSpace: "pre-wrap" }}>
+              {exportError}
+            </pre>
+          )}
+        </div>
+      </div>
+
+      
 
       <p style={{ color: "#666", marginTop: 8 }}>
         音声が早いなら+方向、音声が遅いなら-方向にオフセットを調整してください。<br />
         動画が早いなら-方向、動画が遅いなら+方向にオフセットを調整してください。<br />
-        注: ブラウザでは「音声の前進（負の遅延）」は本質的に難しいため、seek同期で追従しています。
-        高精度にやる場合は mp4 から音声を抽出して AudioBuffer/Worklet で再生する方式に進化させます。
       </p>
     </div>
   );
@@ -335,6 +381,8 @@ function safeSetCurrentTime(el: HTMLMediaElement, t: number) {
   try {
     el.currentTime = t;
   } catch {
-    // 端末やタイミングによっては例外になることがあるので握りつぶす
+    // タイミング次第で currentTime 設定が失敗することがあるため握りつぶす
   }
 }
+
+
