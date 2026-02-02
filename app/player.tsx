@@ -18,7 +18,7 @@ export default function Player() {
   const [offsetSec, setOffsetSec] = useState(0);
 
   const [playbackRate, setPlaybackRate] = useState(1.0);
-  const [debugText, setDebugText] = useState("");
+  const debugRef = useRef<HTMLPreElement | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -32,6 +32,11 @@ export default function Player() {
   // 同期ループ
   const rafRef = useRef<number | null>(null);
   const lastDebugAtRef = useRef(0);
+  const lastSyncCheckAtRef = useRef(0);
+  const offsetDraggingRef = useRef(false);
+
+  // safeSetCurrentTime の “古いリトライ上書き” 防止トークン
+  const seekTokenRef = useRef(0);
 
   const urlForCleanup = useRef<string | null>(null);
 
@@ -47,6 +52,11 @@ export default function Player() {
     setSrcUrl(url);
     setSourceFile(file);
     setPlaying(false);
+
+    // 任意：表示リセット
+    setExportError(null);
+    setExportProgress(0);
+    if (debugRef.current) debugRef.current.textContent = "";
   };
 
   // AudioContext 初期化
@@ -66,7 +76,6 @@ export default function Player() {
 
     if (!mediaSourceRef.current) {
       // objectURL なので crossOrigin は不要
-      // audioEl.crossOrigin = "anonymous";
       mediaSourceRef.current = ctx.createMediaElementSource(audioEl);
 
       gainRef.current = ctx.createGain();
@@ -78,35 +87,8 @@ export default function Player() {
     }
   };
 
-  // 再生/一時停止
-  const play = async () => {
-    const v = videoRef.current;
+  const onVideoPause = () => {
     const a = audioRef.current;
-    if (!v || !a || !srcUrl) return;
-
-    await ensureAudioGraph();
-
-    // video 側はミュート
-    v.muted = true;
-
-    // 再生速度を揃える
-    v.playbackRate = playbackRate;
-    a.playbackRate = playbackRate;
-
-    // audioTime = videoTime - offsetSec
-    const baseOffset = offsetSec;
-    const targetAudioTime = clamp(v.currentTime - baseOffset, 0, a.duration || Infinity);
-    safeSetCurrentTime(a, targetAudioTime);
-
-    await a.play();
-    await v.play();
-    setPlaying(true);
-  };
-
-  const pause = () => {
-    const v = videoRef.current;
-    const a = audioRef.current;
-    v?.pause();
     a?.pause();
     setPlaying(false);
   };
@@ -120,6 +102,7 @@ export default function Player() {
     setExportError(null);
     setExportProgress(0);
     setExporting(true);
+
     try {
       const blob = await exportVideoWithOffset({
         file: sourceFile,
@@ -127,15 +110,22 @@ export default function Player() {
         offsetSec,
         onProgress: (p) => setExportProgress(p),
       });
+
       const url = URL.createObjectURL(blob);
+      const originalName = sourceFile.name.replace(/\.[^/.]+$/, "");
+      const rateTag =
+        Math.abs(playbackRate - 1.0) > 1e-6 ? `_rate${playbackRate.toFixed(2)}` : "";
+      const offsetTag =
+        Math.abs(offsetSec) > 1e-6 ? `_offset${offsetSec.toFixed(3)}` : "";
+      const fileName = `${originalName}${rateTag}${offsetTag}.mp4`;
+
       const a = document.createElement("a");
       a.href = url;
-      a.download = "exported.mp4";
+      a.download = fileName;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : String(err ?? "export failed");
+      const message = err instanceof Error ? err.message : String(err ?? "export failed");
       // eslint-disable-next-line no-console
       console.error("export failed:", err);
       setExportError(message);
@@ -154,23 +144,51 @@ export default function Player() {
     await ensureAudioGraph();
 
     v.muted = true;
+    a.muted = false;
+
     v.playbackRate = playbackRate;
     a.playbackRate = playbackRate;
 
-    safeSetCurrentTime(a, clamp(v.currentTime - offsetSec, 0, a.duration || Infinity));
+    // まず合わせる
+    safeSetCurrentTime(
+      a,
+      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      seekTokenRef
+    );
 
+    // video → audio の順で開始（安定しやすい）
+    await v.play();
     await a.play();
+
+    // 次フレームでもう一回合わせる（初期ズレ潰し）
+    requestAnimationFrame(() => {
+      const vNow = videoRef.current;
+      const aNow = audioRef.current;
+      if (!vNow || !aNow) return;
+      safeSetCurrentTime(
+        aNow,
+        clamp(vNow.currentTime - offsetSec, 0, aNow.duration || Infinity),
+        seekTokenRef
+      );
+    });
+
     setPlaying(true);
   };
 
-  // seekSync: スライダー操作直後に一度シーク
+  // seekSync: offset変更が確定したら1回だけシーク（ドラッグ中はしない）
   useEffect(() => {
     if (!playing) return;
+    if (offsetDraggingRef.current) return;
+
     const v = videoRef.current;
     const a = audioRef.current;
     if (!v || !a) return;
-    const baseOffset = offsetSec;
-    safeSetCurrentTime(a, clamp(v.currentTime - baseOffset, 0, a.duration || Infinity));
+
+    safeSetCurrentTime(
+      a,
+      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      seekTokenRef
+    );
   }, [offsetSec, playing]);
 
   // 再生速度反映
@@ -182,7 +200,7 @@ export default function Player() {
     a.playbackRate = playbackRate;
   }, [playbackRate]);
 
-  // 同期ループ
+  // 同期ループ（ドラッグ中は補正しない / 100ms判定でジャンプ補正のみ）
   useEffect(() => {
     if (!playing) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -195,30 +213,49 @@ export default function Player() {
     if (!v || !a) return;
 
     const tick = () => {
-      // audioTime = videoTime - offsetSec
-      const videoTime = v.currentTime;
-      const baseOffset = offsetSec;
-      const expectedAudio = videoTime - baseOffset;
+      const now = performance.now();
 
-      const diff = (a.currentTime - expectedAudio);
+      // ドラッグ中は “補正しない”。音は基準速度に固定。
+      if (offsetDraggingRef.current) {
+        a.playbackRate = playbackRate;
 
-      // 大きくズレたらジャンプで再同期
-        if (Math.abs(diff) > 0.15) {
-          safeSetCurrentTime(a, clamp(expectedAudio, 0, a.duration || Infinity));
-        } else {
-        // 小さいズレは playbackRate を微調整して吸収
-        const k = 0.25; // 追従の強さ
-          const rate = clamp(1.0 - diff * k, 0.95, 1.05) * playbackRate;
-          a.playbackRate = rate;
+        if (now - lastDebugAtRef.current > 250) {
+          lastDebugAtRef.current = now;
+          const expectedAudio = v.currentTime - offsetSec;
+          const diff = a.currentTime - expectedAudio;
+          if (debugRef.current) {
+            debugRef.current.textContent =
+              `v=${v.currentTime.toFixed(3)} a=${a.currentTime.toFixed(3)} exp=${expectedAudio.toFixed(3)} diff=${diff.toFixed(3)} (dragging)`;
+          }
         }
 
-      const now = performance.now();
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      // audioTime = videoTime - offsetSec
+      const expectedAudio = v.currentTime - offsetSec;
+      const diff = a.currentTime - expectedAudio;
+
+      // 100msごとにズレを判定して、大きい時だけジャンプ補正
+      if (now - lastSyncCheckAtRef.current > 100) {
+        lastSyncCheckAtRef.current = now;
+
+        if (Math.abs(diff) > 0.12) {
+          safeSetCurrentTime(a, clamp(expectedAudio, 0, a.duration || Infinity), seekTokenRef);
+        }
+
+        // うねり防止：常に基準速度へ戻す
+        a.playbackRate = playbackRate;
+      }
+
+      // デバッグ表示（DOM直接）
       if (now - lastDebugAtRef.current > 250) {
         lastDebugAtRef.current = now;
-        const diff = a.currentTime - expectedAudio;
-        setDebugText(
-          `v=${videoTime.toFixed(3)} a=${a.currentTime.toFixed(3)} exp=${expectedAudio.toFixed(3)} diff=${diff.toFixed(3)}`
-        );
+        if (debugRef.current) {
+          debugRef.current.textContent =
+            `v=${v.currentTime.toFixed(3)} a=${a.currentTime.toFixed(3)} exp=${expectedAudio.toFixed(3)} diff=${diff.toFixed(3)}`;
+        }
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -231,13 +268,34 @@ export default function Player() {
     };
   }, [playing, offsetSec, playbackRate]);
 
-  // シーク時の追従
+  // シーク時の追従（ドラッグ中は無視）
   const onVideoSeeked = () => {
+    if (offsetDraggingRef.current) return;
+
     const v = videoRef.current;
     const a = audioRef.current;
     if (!v || !a) return;
-    const baseOffset = offsetSec;
-    safeSetCurrentTime(a, clamp(v.currentTime - baseOffset, 0, a.duration || Infinity));
+
+    safeSetCurrentTime(
+      a,
+      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      seekTokenRef
+    );
+  };
+
+  const onOffsetCommit = () => {
+    offsetDraggingRef.current = false;
+    if (!playing) return;
+
+    const v = videoRef.current;
+    const a = audioRef.current;
+    if (!v || !a) return;
+
+    safeSetCurrentTime(
+      a,
+      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      seekTokenRef
+    );
   };
 
   // src URL 更新
@@ -252,7 +310,6 @@ export default function Player() {
       v.currentTime = 0;
       a.currentTime = 0;
     }
-    return () => {};
   }, [srcUrl]);
 
   // アンマウント時の後始末
@@ -261,14 +318,18 @@ export default function Player() {
       if (urlForCleanup.current) URL.revokeObjectURL(urlForCleanup.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
 
-      // AudioContext を閉じる（任意）
       audioCtxRef.current?.close().catch(() => {});
     };
   }, []);
 
   return (
     <div style={{ display: "grid", gap: 12, maxWidth: 900 }}>
-      <Script src="/ffmpeg/ffmpeg.js" strategy="afterInteractive" onLoad={() => setFfmpegReady(true)} />
+      <Script
+        src="/ffmpeg/ffmpeg.js"
+        strategy="afterInteractive"
+        onLoad={() => setFfmpegReady(true)}
+      />
+
       <input
         type="file"
         accept="video/mp4"
@@ -276,14 +337,15 @@ export default function Player() {
       />
 
       <div style={{ display: "grid", gap: 8 }}>
-        <video muted
+        <video
+          muted
           ref={videoRef}
           controls
           style={{ width: "100%", background: "#000" }}
           onSeeked={onVideoSeeked}
           onPlay={startFromVideo}
-          onPause={pause}
-          onEnded={pause}
+          onPause={onVideoPause}
+          onEnded={onVideoPause}
         />
         {/* 音声は UI を出さずに使う */}
         <audio ref={audioRef} style={{ width: "100%" }} />
@@ -320,35 +382,40 @@ export default function Player() {
         </div>
 
         <div style={{ display: "grid", gap: 6 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span>音声オフセット: {offsetSec.toFixed(3)} 秒（+で遅延 / -で前進）</span>
-          <button
-            type="button"
-            onClick={() => setOffsetSec((v) => clamp(v - 0.005, -1.0, 1.0))}
-            disabled={!srcUrl}
-          >
-            -
-          </button>
-          <input
-            type="range"
-            min={-1.0}
-            max={1.0}
-            step={0.005}
-            value={offsetSec}
-            onChange={(e) => setOffsetSec(parseFloat(e.target.value))}
-            disabled={!srcUrl}
-            style={{ flex: 1, minWidth: 260, height: 28 }}
-          />
-          <button
-            type="button"
-            onClick={() => setOffsetSec((v) => clamp(v + 0.005, -1.0, 1.0))}
-            disabled={!srcUrl}
-          >
-            +
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span>音声オフセット: {offsetSec.toFixed(3)} 秒（+で遅延 / -で前進）</span>
+            <button
+              type="button"
+              onClick={() => setOffsetSec((v) => clamp(v - 0.005, -1.0, 1.0))}
+              disabled={!srcUrl}
+            >
+              -
+            </button>
+            <input
+              type="range"
+              min={-1.0}
+              max={1.0}
+              step={0.005}
+              value={offsetSec}
+              onPointerDown={() => (offsetDraggingRef.current = true)}
+              onPointerUp={onOffsetCommit}
+              onPointerCancel={onOffsetCommit}
+              onChange={(e) => setOffsetSec(parseFloat(e.target.value))}
+              onMouseUp={onOffsetCommit}
+              onTouchEnd={onOffsetCommit}
+              disabled={!srcUrl}
+              style={{ flex: 1, minWidth: 260, height: 28 }}
+            />
+            <button
+              type="button"
+              onClick={() => setOffsetSec((v) => clamp(v + 0.005, -1.0, 1.0))}
+              disabled={!srcUrl}
+            >
+              +
+            </button>
+          </div>
+          <pre ref={debugRef} style={{ margin: 0, fontSize: 12, color: "#444" }} />
         </div>
-        <pre style={{ margin: 0, fontSize: 12, color: "#444" }}>{debugText}</pre>
-      </div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <button onClick={onExport} disabled={!srcUrl || exporting}>
@@ -363,8 +430,6 @@ export default function Player() {
         </div>
       </div>
 
-      
-
       <p style={{ color: "#666", marginTop: 8 }}>
         音声が早いなら+方向、音声が遅いなら-方向にオフセットを調整してください。<br />
         動画が早いなら-方向、動画が遅いなら+方向にオフセットを調整してください。<br />
@@ -377,12 +442,28 @@ function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
 }
 
-function safeSetCurrentTime(el: HTMLMediaElement, t: number) {
+/**
+ * currentTime はタイミング次第で例外になることがある
+ * - 失敗したら次フレームに1回だけリトライ
+ * - ただし “古いリトライ” が新しい seek を上書きしないよう token でガード
+ */
+function safeSetCurrentTime(
+  el: HTMLMediaElement,
+  t: number,
+  tokenRef?: { current: number }
+) {
+  const token = tokenRef ? ++tokenRef.current : 0;
+
   try {
     el.currentTime = t;
   } catch {
-    // タイミング次第で currentTime 設定が失敗することがあるため握りつぶす
+    requestAnimationFrame(() => {
+      if (tokenRef && token !== tokenRef.current) return; // 新しいseekが来ていたら中止
+      try {
+        el.currentTime = t;
+      } catch {
+        // 再試行でも失敗したら諦める
+      }
+    });
   }
 }
-
-
