@@ -26,6 +26,8 @@ export default function Player() {
   const [ffmpegReady, setFfmpegReady] = useState(false);
   const [trimStartSec, setTrimStartSec] = useState<number | null>(null);
   const [trimEndSec, setTrimEndSec] = useState<number | null>(null);
+  const exportStartedAtRef = useRef(0);
+  const exportProgressRef = useRef(0);
 
   // WebAudio
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -98,12 +100,22 @@ export default function Player() {
 
   const onExport = async () => {
     if (!sourceFile || exporting) return;
+    if (
+      trimStartSec !== null &&
+      trimEndSec !== null &&
+      trimStartSec >= trimEndSec
+    ) {
+      setExportError("始点は終点より前にしてください。");
+      return;
+    }
     if (!ffmpegReady) {
       setExportError("FFmpeg の読み込み中です。少し待って再度お試しください。");
       return;
     }
     setExportError(null);
     setExportProgress(0);
+    exportProgressRef.current = 0;
+    exportStartedAtRef.current = performance.now();
     setExporting(true);
 
     try {
@@ -113,7 +125,15 @@ export default function Player() {
         offsetSec,
         trimStartSec,
         trimEndSec,
-        onProgress: (p) => setExportProgress(p),
+        onProgress: (p) => {
+          if (!Number.isFinite(p)) return;
+          const now = performance.now();
+          if (p >= 0.999 && now - exportStartedAtRef.current < 800) return;
+          const safe = Math.min(1, Math.max(0, p));
+          if (safe < exportProgressRef.current) return;
+          exportProgressRef.current = safe;
+          setExportProgress(safe);
+        },
       });
 
       const url = URL.createObjectURL(blob);
@@ -368,52 +388,6 @@ export default function Player() {
         <audio ref={audioRef} style={{ width: "100%" }} />
       </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-        <button
-          type="button"
-          onClick={() => {
-            const v = videoRef.current;
-            if (!v) return;
-            v.currentTime = clamp(v.currentTime - 10, 0, v.duration || Infinity);
-          }}
-          disabled={!srcUrl}
-        >
-          -10秒
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            const v = videoRef.current;
-            if (!v) return;
-            v.currentTime = clamp(v.currentTime - 5, 0, v.duration || Infinity);
-          }}
-          disabled={!srcUrl}
-        >
-          -5秒
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            const v = videoRef.current;
-            if (!v) return;
-            v.currentTime = clamp(v.currentTime + 5, 0, v.duration || Infinity);
-          }}
-          disabled={!srcUrl}
-        >
-          +5秒
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            const v = videoRef.current;
-            if (!v) return;
-            v.currentTime = clamp(v.currentTime + 10, 0, v.duration || Infinity);
-          }}
-          disabled={!srcUrl}
-        >
-          +10秒
-        </button>
-      </div>
 
       <div style={{ display: "grid", gap: 8 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -532,7 +506,16 @@ export default function Player() {
         </div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={onExport} disabled={!srcUrl || exporting}>
+          <button
+            onClick={onExport}
+            disabled={
+              !srcUrl ||
+              exporting ||
+              (trimStartSec !== null &&
+                trimEndSec !== null &&
+                trimStartSec >= trimEndSec)
+            }
+          >
             {exporting ? "書き出し中…" : "書き出し（速度/オフセット反映）"}
           </button>
           {exporting && <span>{Math.round(exportProgress * 100)}%</span>}
