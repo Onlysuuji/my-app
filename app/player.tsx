@@ -387,7 +387,52 @@ export default function Player() {
         {/* 音声は UI を出さずに使う */}
         <audio ref={audioRef} style={{ width: "100%" }} />
       </div>
-
+      <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+        <button
+          type="button"
+          onClick={() => {
+            const v = videoRef.current;
+            if (!v) return;
+            v.currentTime = clamp(v.currentTime - 10, 0, v.duration || Infinity);
+          }}
+          disabled={!srcUrl}
+        >
+          -10秒
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            const v = videoRef.current;
+            if (!v) return;
+            v.currentTime = clamp(v.currentTime - 5, 0, v.duration || Infinity);
+          }}
+          disabled={!srcUrl}
+        >
+          -5秒
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            const v = videoRef.current;
+            if (!v) return;
+            v.currentTime = clamp(v.currentTime + 5, 0, v.duration || Infinity);
+          }}
+          disabled={!srcUrl}
+        >
+          +5秒
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            const v = videoRef.current;
+            if (!v) return;
+            v.currentTime = clamp(v.currentTime + 10, 0, v.duration || Infinity);
+          }}
+          disabled={!srcUrl}
+        >
+          +10秒
+        </button>
+      </div>
 
       <div style={{ display: "grid", gap: 8 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -530,9 +575,9 @@ export default function Player() {
       </div>
 
       <p style={{ color: "#666", marginTop: 8 }}>
-        ・動画自体の音声は変更されてないので動画のほうはミュートにしてください。<br />
         ・音声が早いなら+方向、音声が遅いなら-方向にオフセットを調整してください。<br />
         　動画が早いなら-方向、動画が遅いなら+方向にオフセットを調整してください。<br />
+        ・動画自体の音声は変更されてないので動画のほうはミュートにしてください。<br />
       </p>
     </div>
   );
