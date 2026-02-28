@@ -234,8 +234,8 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   } catch {
     const detail = logBuffer.slice(-25).join("\n");
     const message = detail
-      ? `書き出しに失敗しました。\n\nFFmpeg log:\n${detail}`
-      : "書き出しに失敗しました。";
+      ? `保存に失敗しました。\n\nFFmpeg log:\n${detail}`
+      : "保存に失敗しました。";
     throw new Error(message);
   }
 

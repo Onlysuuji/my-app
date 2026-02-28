@@ -5,6 +5,13 @@ import Script from "next/script";
 import { exportVideoWithOffset } from "./lib/ffmpeg-export";
 
 // 同期方式は seekSync のみ使用
+const iconButtonStyle: React.CSSProperties = {
+  width: 36,
+  height: 36,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
 
 
 export default function Player() {
@@ -42,8 +49,10 @@ export default function Player() {
 
   // safeSetCurrentTime の “古いリトライ上書き” 防止トークン
   const seekTokenRef = useRef(0);
+  const playStartTokenRef = useRef(0);
 
   const urlForCleanup = useRef<string | null>(null);
+  const [isVideoFullscreen, setIsVideoFullscreen] = useState(false);
 
   // ファイル選択
   const onPickFile = (file: File | null) => {
@@ -93,6 +102,7 @@ export default function Player() {
   };
 
   const onVideoPause = () => {
+    playStartTokenRef.current += 1;
     const a = audioRef.current;
     a?.pause();
     setPlaying(false);
@@ -151,7 +161,6 @@ export default function Player() {
       URL.revokeObjectURL(url);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err ?? "export failed");
-      // eslint-disable-next-line no-console
       console.error("export failed:", err);
       setExportError(message);
     } finally {
@@ -161,6 +170,7 @@ export default function Player() {
 
   // 動画の controls から再生された場合の同期開始
   const startFromVideo = async () => {
+    const startToken = ++playStartTokenRef.current;
     const v = videoRef.current;
     const a = audioRef.current;
     if (!v || !a || !srcUrl) return;
@@ -181,12 +191,21 @@ export default function Player() {
       seekTokenRef
     );
 
-    // video → audio の順で開始（安定しやすい）
-    await v.play();
-    await a.play();
+    // onPlay で呼ばれるため video.play() は不要。audio.play() だけ同期して開始。
+    try {
+      await a.play();
+    } catch (err) {
+      // 再生中断（pause 競合）による AbortError は想定内として握りつぶす
+      if (!isPlayInterruptedError(err)) {
+        console.error("audio play failed:", err);
+      }
+      return;
+    }
+    if (startToken !== playStartTokenRef.current) return;
 
     // 次フレームでもう一回合わせる（初期ズレ潰し）
     requestAnimationFrame(() => {
+      if (startToken !== playStartTokenRef.current) return;
       const vNow = videoRef.current;
       const aNow = audioRef.current;
       if (!vNow || !aNow) return;
@@ -337,6 +356,27 @@ export default function Player() {
     }
   }, [srcUrl]);
 
+  useEffect(() => {
+    const onFullscreenStateChange = () => {
+      const fullscreenEl = document.fullscreenElement;
+      setIsVideoFullscreen(fullscreenEl === videoRef.current);
+    };
+    const onBeginFullscreen = () => setIsVideoFullscreen(true);
+    const onEndFullscreen = () => setIsVideoFullscreen(false);
+    const v = videoRef.current;
+
+    document.addEventListener("fullscreenchange", onFullscreenStateChange);
+    // iOS Safari のネイティブ fullscreen 用
+    v?.addEventListener("webkitbeginfullscreen", onBeginFullscreen as EventListener);
+    v?.addEventListener("webkitendfullscreen", onEndFullscreen as EventListener);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenStateChange);
+      v?.removeEventListener("webkitbeginfullscreen", onBeginFullscreen as EventListener);
+      v?.removeEventListener("webkitendfullscreen", onEndFullscreen as EventListener);
+    };
+  }, []);
+
   // アンマウント時の後始末
   useEffect(() => {
     return () => {
@@ -378,7 +418,12 @@ export default function Player() {
           muted
           ref={videoRef}
           controls
-          style={{ width: "100%", background: "#000" }}
+          style={{
+            width: "100%",
+            height: isVideoFullscreen ? "100%" : "auto",
+            background: "#000",
+            objectFit: isVideoFullscreen ? "cover" : "contain",
+          }}
           onSeeked={onVideoSeeked}
           onPlay={startFromVideo}
           onPause={onVideoPause}
@@ -440,11 +485,12 @@ export default function Player() {
           <span>{playbackRate.toFixed(2)}x</span>
           <button
             type="button"
+            aria-label="再生速度を下げる"
             onClick={() => setPlaybackRate((r) => clamp(r - 0.05, 0.1, 2.0))}
             disabled={!srcUrl}
-            className="text-2xl"
+            style={iconButtonStyle}
           >
-            -
+            <MinusIcon />
           </button>
           <input
             type="range"
@@ -458,11 +504,12 @@ export default function Player() {
           />
           <button
             type="button"
+            aria-label="再生速度を上げる"
             onClick={() => setPlaybackRate((r) => clamp(r + 0.05, 0.1, 2.0))}
             disabled={!srcUrl}
-            className="text-2xl"
+            style={iconButtonStyle}
           >
-            +
+            <PlusIcon />
           </button>
         </div>
 
@@ -471,11 +518,12 @@ export default function Player() {
             <span>音声オフセット: {offsetSec.toFixed(3)} 秒</span>
             <button
               type="button"
+              aria-label="音声オフセットを下げる"
               onClick={() => setOffsetSec((v) => clamp(v - 0.005, -1.0, 1.0))}
               disabled={!srcUrl}
-              className="text-2xl"
+              style={iconButtonStyle}
             >
-              -
+              <MinusIcon />
             </button>
             <input
               type="range"
@@ -494,11 +542,12 @@ export default function Player() {
             />
             <button
               type="button"
+              aria-label="音声オフセットを上げる"
               onClick={() => setOffsetSec((v) => clamp(v + 0.005, -1.0, 1.0))}
               disabled={!srcUrl}
-              className="text-2xl"
+              style={iconButtonStyle}
             >
-              +
+              <PlusIcon />
             </button>
           </div>
           <pre ref={debugRef} style={{ margin: 0, fontSize: 12, color: "#444" }} />
@@ -561,7 +610,7 @@ export default function Player() {
                 trimStartSec >= trimEndSec)
             }
           >
-            {exporting ? "書き出し中…" : "書き出し（速度/オフセット反映）"}
+            {exporting ? "ダウンロード中…" : "ダウンロード（速度/オフセット反映）"}
           </button>
           {exporting && <span>{Math.round(exportProgress * 100)}%</span>}
           {exportError && (
@@ -585,6 +634,47 @@ export default function Player() {
 
 function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
+}
+
+function MinusIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function isPlayInterruptedError(err: unknown) {
+  return err instanceof DOMException && err.name === "AbortError";
 }
 
 /**
