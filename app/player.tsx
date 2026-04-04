@@ -146,7 +146,12 @@ export default function Player() {
   };
 
   // ファイル選択
-  const onPickFile = (file: File | null) => {
+  const onPickFile = (
+    file: File | null,
+    options?: {
+      keepCurrentTab?: boolean;
+    }
+  ) => {
     if (!file) return;
 
     stopLocalPlayback();
@@ -157,7 +162,9 @@ export default function Player() {
 
     const url = URL.createObjectURL(file);
     urlForCleanup.current = url;
-    setSourceMode("local");
+    if (!options?.keepCurrentTab) {
+      setSourceMode("local");
+    }
     setSrcUrl(url);
     setSourceFile(file);
     setYoutubeSource(null);
@@ -444,7 +451,7 @@ export default function Player() {
         type: blob.type || "video/mp4",
       });
 
-      onPickFile(importedFile);
+      onPickFile(importedFile, { keepCurrentTab: true });
     } catch (err) {
       const error =
         err instanceof Error ? err : new Error("YouTube 動画の取り込みに失敗しました。");
