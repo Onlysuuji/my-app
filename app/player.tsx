@@ -20,6 +20,11 @@ type SearchYouTubeResponse = {
   error?: string;
 };
 
+type PlaybackBookmark = {
+  id: string;
+  timeSec: number;
+};
+
 // 同期方式は seekSync のみ使用
 const iconButtonStyle: React.CSSProperties = {
   width: 36,
@@ -66,6 +71,7 @@ export default function Player() {
   const [ffmpegReady, setFfmpegReady] = useState(false);
   const [trimStartSec, setTrimStartSec] = useState<number | null>(null);
   const [trimEndSec, setTrimEndSec] = useState<number | null>(null);
+  const [bookmarks, setBookmarks] = useState<PlaybackBookmark[]>([]);
   const [youtubeUrlInput, setYoutubeUrlInput] = useState("");
   const [youtubeUrlError, setYoutubeUrlError] = useState<string | null>(null);
   const [youtubeSearchInput, setYoutubeSearchInput] = useState("");
@@ -170,10 +176,32 @@ export default function Player() {
     setYoutubeSource(null);
     setYoutubeWarning(null);
     setYoutubeImportError(null);
+    setBookmarks([]);
 
     // 任意：表示リセット
     setExportError(null);
     setExportProgress(0);
+  };
+
+  const saveBookmarkAtCurrentTime = () => {
+    const video = videoRef.current;
+    if (!video || !localSourceReady) return;
+
+    const timeSec = roundBookmarkTime(video.currentTime);
+    setBookmarks((current) =>
+      [...current, { id: createBookmarkId(), timeSec }].sort((a, b) => a.timeSec - b.timeSec)
+    );
+  };
+
+  const jumpToBookmark = (timeSec: number) => {
+    const video = videoRef.current;
+    if (!video || !localSourceReady) return;
+
+    video.currentTime = clamp(timeSec, 0, video.duration || Infinity);
+  };
+
+  const deleteBookmark = (bookmarkId: string) => {
+    setBookmarks((current) => current.filter((bookmark) => bookmark.id !== bookmarkId));
   };
 
   // AudioContext 初期化
@@ -677,7 +705,7 @@ export default function Player() {
   }, []);
 
   return (
-    <div style={{ display: "grid", gap: 16, maxWidth: 960 }}>
+    <div style={{ display: "grid", gap: 16, width: "100%" }}>
       <Script
         src="/ffmpeg/ffmpeg.js"
         strategy="afterInteractive"
@@ -854,115 +882,83 @@ export default function Player() {
         </section>
       )}
 
-      <section className="grid gap-8">
-        <div className="grid gap-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <video
-            muted
-            ref={videoRef}
-            controls
-            style={{
-              width: "100%",
-              height: "auto",
-              background: "#000",
-              objectFit: "contain",
-            }}
-            onSeeked={onVideoSeeked}
-            onPlay={startFromVideo}
-            onPause={onVideoPause}
-            onEnded={onVideoPause}
-          />
-          <audio ref={audioRef} style={{ width: "100%" }} />
-        </div>
-
-        <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-            <button
-              type="button"
-              onClick={() => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.currentTime = clamp(v.currentTime - 10, 0, v.duration || Infinity);
+      <section className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-start">
+        <div className="grid gap-8">
+          <div className="grid gap-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <video
+              muted
+              ref={videoRef}
+              controls
+              style={{
+                width: "100%",
+                height: "auto",
+                background: "#000",
+                objectFit: "contain",
               }}
-              disabled={localControlsDisabled}
-            >
-              -10秒
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.currentTime = clamp(v.currentTime - 5, 0, v.duration || Infinity);
-              }}
-              disabled={localControlsDisabled}
-            >
-              -5秒
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.currentTime = clamp(v.currentTime + 5, 0, v.duration || Infinity);
-              }}
-              disabled={localControlsDisabled}
-            >
-              +5秒
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.currentTime = clamp(v.currentTime + 10, 0, v.duration || Infinity);
-              }}
-              disabled={localControlsDisabled}
-            >
-              +10秒
-            </button>
+              onSeeked={onVideoSeeked}
+              onPlay={startFromVideo}
+              onPause={onVideoPause}
+              onEnded={onVideoPause}
+            />
+            <audio ref={audioRef} style={{ width: "100%" }} />
           </div>
 
-          <div style={{ display: "grid", gap: 8 }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span>再生速度:</span>
-              <span>{playbackRate.toFixed(2)}x</span>
+          <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
               <button
                 type="button"
-                aria-label="再生速度を下げる"
-                onClick={() => setPlaybackRate((r) => clamp(r - 0.05, 0.1, 2.0))}
+                onClick={() => {
+                  const v = videoRef.current;
+                  if (!v) return;
+                  v.currentTime = clamp(v.currentTime - 10, 0, v.duration || Infinity);
+                }}
                 disabled={localControlsDisabled}
-                style={iconButtonStyle}
               >
-                <MinusIcon />
+                -10秒
               </button>
-              <input
-                type="range"
-                min={0.1}
-                max={2.0}
-                step={0.05}
-                value={playbackRate}
-                onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
-                disabled={localControlsDisabled}
-                style={{ flex: 1, minWidth: 260, height: 28 }}
-              />
               <button
                 type="button"
-                aria-label="再生速度を上げる"
-                onClick={() => setPlaybackRate((r) => clamp(r + 0.05, 0.1, 2.0))}
+                onClick={() => {
+                  const v = videoRef.current;
+                  if (!v) return;
+                  v.currentTime = clamp(v.currentTime - 5, 0, v.duration || Infinity);
+                }}
                 disabled={localControlsDisabled}
-                style={iconButtonStyle}
               >
-                <PlusIcon />
+                -5秒
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const v = videoRef.current;
+                  if (!v) return;
+                  v.currentTime = clamp(v.currentTime + 5, 0, v.duration || Infinity);
+                }}
+                disabled={localControlsDisabled}
+              >
+                +5秒
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const v = videoRef.current;
+                  if (!v) return;
+                  v.currentTime = clamp(v.currentTime + 10, 0, v.duration || Infinity);
+                }}
+                disabled={localControlsDisabled}
+              >
+                +10秒
               </button>
             </div>
 
-            <div style={{ display: "grid", gap: 6 }}>
+            <div style={{ display: "grid", gap: 8 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span>音声オフセット: {offsetSec.toFixed(3)} 秒</span>
+                <span>再生速度:</span>
+                <span>{playbackRate.toFixed(2)}x</span>
                 <button
                   type="button"
-                  aria-label="音声オフセットを下げる"
-                  onClick={() => setOffsetSec((v) => clamp(v - 0.005, -0.3, 0.3))}
+                  aria-label="再生速度を下げる"
+                  onClick={() => setPlaybackRate((r) => clamp(r - 0.05, 0.1, 2.0))}
                   disabled={localControlsDisabled}
                   style={iconButtonStyle}
                 >
@@ -970,127 +966,207 @@ export default function Player() {
                 </button>
                 <input
                   type="range"
-                  min={-0.3}
-                  max={0.3}
-                  step={0.005}
-                  value={offsetSec}
-                  onPointerDown={() => (offsetDraggingRef.current = true)}
-                  onPointerUp={onOffsetCommit}
-                  onPointerCancel={onOffsetCommit}
-                  onChange={(e) => setOffsetSec(parseFloat(e.target.value))}
-                  onMouseUp={onOffsetCommit}
-                  onTouchEnd={onOffsetCommit}
+                  min={0.1}
+                  max={2.0}
+                  step={0.05}
+                  value={playbackRate}
+                  onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
                   disabled={localControlsDisabled}
                   style={{ flex: 1, minWidth: 260, height: 28 }}
                 />
                 <button
                   type="button"
-                  aria-label="音声オフセットを上げる"
-                  onClick={() => setOffsetSec((v) => clamp(v + 0.005, -0.3, 0.3))}
+                  aria-label="再生速度を上げる"
+                  onClick={() => setPlaybackRate((r) => clamp(r + 0.05, 0.1, 2.0))}
                   disabled={localControlsDisabled}
                   style={iconButtonStyle}
                 >
                   <PlusIcon />
                 </button>
               </div>
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span>選択範囲:</span>
-              <span>
-                {trimStartSec !== null ? trimStartSec.toFixed(3) : "--"} ~{" "}
-                {trimEndSec !== null ? trimEndSec.toFixed(3) : "--"}
-              </span>
-              <button
-                type="button"
-                disabled={localControlsDisabled}
-                onClick={() => {
-                  const v = videoRef.current;
-                  if (!v) return;
-                  setTrimStartSec(v.currentTime);
-                }}
-                className="text-green-300"
-              >
-                始点を現在位置に設定
-              </button>
-              <button
-                type="button"
-                disabled={localControlsDisabled}
-                onClick={() => {
-                  const v = videoRef.current;
-                  if (!v) return;
-                  setTrimEndSec(v.currentTime);
-                }}
-                className="text-red-300"
-              >
-                終点を現在位置に設定
-              </button>
-              <button
-                type="button"
-                disabled={localControlsDisabled}
-                onClick={() => {
-                  setTrimStartSec(null);
-                  setTrimEndSec(null);
-                }}
-              >
-                クリア
-              </button>
-              {trimStartSec !== null &&
-                trimEndSec !== null &&
-                trimStartSec >= trimEndSec && (
-                  <span style={{ color: "#b00" }}>始点は終点より前にしてください</span>
-                )}
-            </div>
 
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <label
-                style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
-              >
-                <span>書き出し画質:</span>
-                <select
-                  value={exportResolution}
-                  onChange={(e) =>
-                    setExportResolution(e.target.value as ExportResolutionPreset)
-                  }
-                  disabled={localControlsDisabled || exporting}
-                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <span>音声オフセット: {offsetSec.toFixed(3)} 秒</span>
+                  <button
+                    type="button"
+                    aria-label="音声オフセットを下げる"
+                    onClick={() => setOffsetSec((v) => clamp(v - 0.005, -0.3, 0.3))}
+                    disabled={localControlsDisabled}
+                    style={iconButtonStyle}
+                  >
+                    <MinusIcon />
+                  </button>
+                  <input
+                    type="range"
+                    min={-0.3}
+                    max={0.3}
+                    step={0.005}
+                    value={offsetSec}
+                    onPointerDown={() => (offsetDraggingRef.current = true)}
+                    onPointerUp={onOffsetCommit}
+                    onPointerCancel={onOffsetCommit}
+                    onChange={(e) => setOffsetSec(parseFloat(e.target.value))}
+                    onMouseUp={onOffsetCommit}
+                    onTouchEnd={onOffsetCommit}
+                    disabled={localControlsDisabled}
+                    style={{ flex: 1, minWidth: 260, height: 28 }}
+                  />
+                  <button
+                    type="button"
+                    aria-label="音声オフセットを上げる"
+                    onClick={() => setOffsetSec((v) => clamp(v + 0.005, -0.3, 0.3))}
+                    disabled={localControlsDisabled}
+                    style={iconButtonStyle}
+                  >
+                    <PlusIcon />
+                  </button>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <span>選択範囲:</span>
+                <span>
+                  {trimStartSec !== null ? trimStartSec.toFixed(3) : "--"} ~{" "}
+                  {trimEndSec !== null ? trimEndSec.toFixed(3) : "--"}
+                </span>
+                <button
+                  type="button"
+                  disabled={localControlsDisabled}
+                  onClick={() => {
+                    const v = videoRef.current;
+                    if (!v) return;
+                    setTrimStartSec(v.currentTime);
+                  }}
+                  className="text-green-300"
                 >
-                  {exportResolutionOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label} ({option.hint})
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  始点を現在位置に設定
+                </button>
+                <button
+                  type="button"
+                  disabled={localControlsDisabled}
+                  onClick={() => {
+                    const v = videoRef.current;
+                    if (!v) return;
+                    setTrimEndSec(v.currentTime);
+                  }}
+                  className="text-red-300"
+                >
+                  終点を現在位置に設定
+                </button>
+                <button
+                  type="button"
+                  disabled={localControlsDisabled}
+                  onClick={() => {
+                    setTrimStartSec(null);
+                    setTrimEndSec(null);
+                  }}
+                >
+                  クリア
+                </button>
+                {trimStartSec !== null &&
+                  trimEndSec !== null &&
+                  trimStartSec >= trimEndSec && (
+                    <span style={{ color: "#b00" }}>始点は終点より前にしてください</span>
+                  )}
+              </div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <label
+                  style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
+                >
+                  <span>書き出し画質:</span>
+                  <select
+                    value={exportResolution}
+                    onChange={(e) =>
+                      setExportResolution(e.target.value as ExportResolutionPreset)
+                    }
+                    disabled={localControlsDisabled || exporting}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                  >
+                    {exportResolutionOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label} ({option.hint})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  onClick={onExport}
+                  disabled={
+                    localControlsDisabled ||
+                    exporting ||
+                    (trimStartSec !== null &&
+                      trimEndSec !== null &&
+                      trimStartSec >= trimEndSec)
+                  }
+                >
+                  {exporting ? "ダウンロード中…" : "ダウンロード（速度/オフセット反映）"}
+                </button>
+                {exporting && <span>{Math.round(exportProgress * 100)}%</span>}
+                {exportError && (
+                  <pre style={{ color: "#b00", margin: 0, whiteSpace: "pre-wrap" }}>
+                    {exportError}
+                  </pre>
+                )}
+              </div>
             </div>
 
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <button
-                onClick={onExport}
-                disabled={
-                  localControlsDisabled ||
-                  exporting ||
-                  (trimStartSec !== null &&
-                    trimEndSec !== null &&
-                    trimStartSec >= trimEndSec)
-                }
-              >
-                {exporting ? "ダウンロード中…" : "ダウンロード（速度/オフセット反映）"}
-              </button>
-              {exporting && <span>{Math.round(exportProgress * 100)}%</span>}
-              {exportError && (
-                <pre style={{ color: "#b00", margin: 0, whiteSpace: "pre-wrap" }}>
-                  {exportError}
-                </pre>
-              )}
-            </div>
+            <p style={{ color: "#666", marginTop: 8 }}>
+              ・音声が早いなら+方向、音声が遅いなら-方向にオフセットを調整してください。<br />
+              　動画が早いなら-方向、動画が遅いなら+方向にオフセットを調整してください。<br />
+              ・動画自体の音声は変更されてないので動画のほうはミュートにしてください。<br />
+            </p>
+          </section>
+        </div>
+
+        <aside className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
+          <div className="grid gap-2">
+            <div className="text-sm font-semibold text-slate-900">再生時間ブックマーク</div>
+            <p className="text-xs text-slate-500">
+              現在位置を保存して、クリックでその時間へ移動できます。
+            </p>
           </div>
-
-          <p style={{ color: "#666", marginTop: 8 }}>
-            ・音声が早いなら+方向、音声が遅いなら-方向にオフセットを調整してください。<br />
-            　動画が早いなら-方向、動画が遅いなら+方向にオフセットを調整してください。<br />
-            ・動画自体の音声は変更されてないので動画のほうはミュートにしてください。<br />
-          </p>
-        </section>
+          <button
+            type="button"
+            onClick={saveBookmarkAtCurrentTime}
+            disabled={localControlsDisabled}
+            className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            保存
+          </button>
+          {bookmarks.length > 0 ? (
+            <div className="grid gap-2">
+              {bookmarks.map((bookmark, index) => (
+                <div key={bookmark.id} className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => jumpToBookmark(bookmark.timeSec)}
+                    className="grid flex-1 gap-1 rounded-lg border border-slate-200 px-3 py-2 text-left hover:border-slate-400"
+                  >
+                    <span className="text-xs text-slate-500">#{index + 1}</span>
+                    <span className="font-mono text-sm text-slate-900">
+                      {formatBookmarkTime(bookmark.timeSec)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteBookmark(bookmark.id)}
+                    className="rounded-md border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:border-slate-400"
+                  >
+                    削除
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">
+              まだブックマークはありません。
+            </div>
+          )}
+        </aside>
       </section>
 
       {sourceMode === "youtube-search" && (
@@ -1221,6 +1297,33 @@ function ModeButton({
 
 function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
+}
+
+function createBookmarkId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function roundBookmarkTime(value: number) {
+  return Math.round(value * 1000) / 1000;
+}
+
+function formatBookmarkTime(value: number) {
+  const totalMilliseconds = Math.max(0, Math.round(value * 1000));
+  const totalSeconds = Math.floor(totalMilliseconds / 1000);
+  const milliseconds = totalMilliseconds % 1000;
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+
+  const base = `${minutes.toString().padStart(2, "0")}:${seconds
+    .toString()
+    .padStart(2, "0")}.${milliseconds.toString().padStart(3, "0")}`;
+
+  if (hours > 0) {
+    return `${hours.toString().padStart(2, "0")}:${base}`;
+  }
+
+  return base;
 }
 
 function MinusIcon() {
