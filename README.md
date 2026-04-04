@@ -1,36 +1,78 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Video + Audio Offset Player
 
-## Getting Started
+ローカル MP4 や YouTube 動画を取り込み、音声オフセット調整、再生速度変更、トリム、FFmpeg ベースの書き出しを行う Next.js アプリです。
 
-First, run the development server:
+## 機能
+
+### ローカルファイル
+
+- MP4 を直接読み込み
+- 音声オフセット調整
+- 再生速度変更
+- トリム範囲設定
+- FFmpeg 書き出し
+
+### YouTube
+
+- YouTube URL の解決
+- YouTube 検索
+- 埋め込みプレビュー
+- `yt-dlp` を使った MP4 取り込み
+
+取り込んだ後はローカル MP4 と同じフローに入り、オフセット調整や書き出しが使えます。
+
+## セットアップ
+
+```bash
+npm install
+```
+
+`.env.example` を参考に `.env.local` を作成します。
+
+```bash
+youtube_api_key=your_youtube_data_api_key_here
+youtube_api_referer=http://localhost:3000/
+YT_DLP_PATH=yt-dlp
+FFMPEG_PATH=ffmpeg
+YT_DLP_MAX_FILESIZE_MB=250
+```
+
+`youtube_api_key` を優先して読み込みます。後方互換のため `YOUTUBE_API_KEY` も利用できます。
+HTTP リファラー制限付きのキーを使う場合は `youtube_api_referer` を設定すると、サーバーからの YouTube API 呼び出しでも `Referer` を付与できます。
+
+### 必要な外部ツール
+
+- `yt-dlp`
+- `ffmpeg`
+
+どちらも PATH に通すか、`.env.local` で実行ファイルパスを指定してください。
+
+例:
+
+```bash
+YT_DLP_PATH=C:\tools\yt-dlp.exe
+FFMPEG_PATH=C:\tools\ffmpeg.exe
+```
+
+## 開発
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+ブラウザで [http://localhost:3000](http://localhost:3000) を開きます。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 検証
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run lint
+npm run build
+```
 
-## Learn More
+`public/ffmpeg/**` は配布済みバンドルのため、ESLint 対象から除外しています。
 
-To learn more about Next.js, take a look at the following resources:
+## 注意
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- YouTube 取り込みはサーバー側で `yt-dlp` を実行します
+- 長い動画や大きい動画は `YT_DLP_MAX_FILESIZE_MB` によって失敗することがあります
+- 利用権限のある動画のみ扱ってください

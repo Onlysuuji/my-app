@@ -1,11 +1,19 @@
-﻿import { fetchFile } from "@ffmpeg/util";
+import { fetchFile } from "@ffmpeg/util";
+
+export type ExportResolutionPreset =
+  | "source"
+  | "1080p"
+  | "720p"
+  | "480p"
+  | "360p";
 
 type ExportOptions = {
   file: File;
   playbackRate: number; // 例: 1.0, 0.75, 1.25
-  offsetSec: number;    // +で遅らせる / -で早める
+  offsetSec: number; // +で遅らせる / -で早める
   trimStartSec?: number | null;
   trimEndSec?: number | null;
+  exportResolution?: ExportResolutionPreset;
   onProgress?: (progress: number) => void;
 };
 
@@ -86,11 +94,22 @@ function buildAtempoFilters(rate: number) {
   return filters;
 }
 
-/** 720pに落とす（長辺1280）。縦横比維持 */
-function buildScaleTo720p() {
-  // 横が長いなら幅1280、縦が長いなら高さ720に寄せる
-  // -2 は 2の倍数へ丸め（x264互換）
-  return "scale='if(gte(iw,ih),min(1280,iw),-2)':'if(gte(iw,ih),-2,min(720,ih))'";
+/** 指定した解像度プリセットまで縮小する。元解像度は維持して拡大しない。 */
+function buildScaleFilter(preset: ExportResolutionPreset) {
+  if (preset === "source") return null;
+
+  const sizeMap: Record<Exclude<ExportResolutionPreset, "source">, [number, number]> = {
+    "1080p": [1920, 1080],
+    "720p": [1280, 720],
+    "480p": [854, 480],
+    "360p": [640, 360],
+  };
+
+  const [maxWidth, maxHeight] = sizeMap[preset];
+
+  // 横長なら幅基準、縦長なら高さ基準に抑える
+  // -2 は 2 の倍数へ丸め（x264 互換）
+  return `scale='if(gte(iw,ih),min(${maxWidth},iw),-2)':'if(gte(iw,ih),-2,min(${maxHeight},ih))'`;
 }
 
 function clampRate(rate: number) {
@@ -105,7 +124,15 @@ function toArrayBuffer(data: Uint8Array) {
 }
 
 export async function exportVideoWithOffset(options: ExportOptions) {
-  const { file, playbackRate, offsetSec, trimStartSec, trimEndSec, onProgress } = options;
+  const {
+    file,
+    playbackRate,
+    offsetSec,
+    trimStartSec,
+    trimEndSec,
+    exportResolution = "720p",
+    onProgress,
+  } = options;
 
   const rate = clampRate(playbackRate);
   const offset = Number.isFinite(offsetSec) ? offsetSec : 0;
@@ -117,13 +144,20 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   const trimEnd = hasTrim ? (trimEndSec as number) : 0;
 
   // 1) 変換不要なら即返す（最速）
-  if (Math.abs(rate - 1.0) < 1e-6 && Math.abs(offset) < 1e-6 && !hasTrim) {
+  if (
+    exportResolution === "source" &&
+    Math.abs(rate - 1.0) < 1e-6 &&
+    Math.abs(offset) < 1e-6 &&
+    !hasTrim
+  ) {
     return file; // FileはBlob互換
   }
 
   // 2) キャッシュキー（同一ファイル×条件なら使い回す）
   // ※ file.lastModified はブラウザ次第で変わることがあるが、軽い用途としては十分
-  const cacheKey = `${file.name}:${file.size}:${file.lastModified}:r=${rate}:o=${offset}:ts=${trimStart}:te=${trimEnd}`;
+  const cacheKey =
+    `${file.name}:${file.size}:${file.lastModified}:` +
+    `r=${rate}:o=${offset}:ts=${trimStart}:te=${trimEnd}:res=${exportResolution}`;
   const cached = exportCache.get(cacheKey);
   if (cached) return cached;
 
@@ -158,14 +192,22 @@ export async function exportVideoWithOffset(options: ExportOptions) {
 
     try {
       await ffmpeg.exec([
-        "-i", inputName,
-        "-filter_complex", `[0:a]${aFilter}[a]`,
-        "-map", "0:v:0",
-        "-map", "[a]",
-        "-c:v", "copy",          // ← 動画はコピー
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
+        "-i",
+        inputName,
+        "-filter_complex",
+        `[0:a]${aFilter}[a]`,
+        "-map",
+        "0:v:0",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
         "-shortest",
         outputName,
       ]);
@@ -175,8 +217,8 @@ export async function exportVideoWithOffset(options: ExportOptions) {
       const blob = new Blob([ab], { type: "video/mp4" });
       exportCache.set(cacheKey, blob);
 
-      await ffmpeg.deleteFile?.(inputName).catch(() => { });
-      await ffmpeg.deleteFile?.(outputName).catch(() => { });
+      await ffmpeg.deleteFile?.(inputName).catch(() => {});
+      await ffmpeg.deleteFile?.(outputName).catch(() => {});
 
       return blob;
     } catch {
@@ -184,15 +226,18 @@ export async function exportVideoWithOffset(options: ExportOptions) {
     }
   }
 
-
   // 4) 速度変更あり or copy失敗：フィルタで再エンコード
-  // video: setpts + 720pスケール + fps少し制限（軽くする）
-  const scale720p = buildScaleTo720p();
+  // video: setpts + 解像度プリセット + fps 少し制限（軽くする）
+  const scaleFilter = buildScaleFilter(exportResolution);
   const videoParts: string[] = [];
   if (hasTrim) {
     videoParts.push(`trim=start=${trimStart}:end=${trimEnd}`, "setpts=PTS-STARTPTS");
   }
-  videoParts.push(`setpts=PTS/${rate}`, scale720p, "fps=30");
+  videoParts.push(`setpts=PTS/${rate}`);
+  if (scaleFilter) {
+    videoParts.push(scaleFilter);
+  }
+  videoParts.push("fps=30");
   const videoFilter = videoParts.join(",");
 
   // audio: offset処理 → atempo
@@ -214,19 +259,30 @@ export async function exportVideoWithOffset(options: ExportOptions) {
 
   try {
     await ffmpeg.exec([
-      "-i", inputName,
-      "-filter_complex", filterComplex,
-      "-map", "[v]",
-      "-map", "[a]",
+      "-i",
+      inputName,
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      "[v]",
+      "-map",
+      "[a]",
       // ブラウザ環境では ultrafast が効く
-      "-c:v", "libx264",
-      "-preset", "ultrafast",
-      // 720pで5分なら CRF 30 前後が「速い＆そこそこ」ライン
-      "-crf", "30",
-      "-pix_fmt", "yuv420p",
-      "-c:a", "aac",
-      "-b:a", "128k",
-      "-movflags", "+faststart",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      // wasm 環境では CRF 30 前後が速さ優先の実用ライン
+      "-crf",
+      "30",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
       // 先に終わった方に合わせる（ズレ処理で長さがずれやすい）
       "-shortest",
       outputName,
@@ -245,8 +301,8 @@ export async function exportVideoWithOffset(options: ExportOptions) {
   exportCache.set(cacheKey, blob);
 
   // 後片付け
-  await ffmpeg.deleteFile?.(inputName).catch(() => { });
-  await ffmpeg.deleteFile?.(outputName).catch(() => { });
+  await ffmpeg.deleteFile?.(inputName).catch(() => {});
+  await ffmpeg.deleteFile?.(outputName).catch(() => {});
 
   return blob;
 }
