@@ -35,6 +35,7 @@ youtube_api_referer=http://localhost:3000/
 YT_DLP_PATH=yt-dlp
 FFMPEG_PATH=ffmpeg
 YT_DLP_MAX_FILESIZE_MB=250
+YT_DLP_COOKIES_FROM_BROWSER=chrome
 ```
 
 `youtube_api_key` を優先して読み込みます。後方互換のため `YOUTUBE_API_KEY` も利用できます。
@@ -53,6 +54,14 @@ HTTP リファラー制限付きのキーを使う場合は `youtube_api_referer
 YT_DLP_PATH=C:\tools\yt-dlp.exe
 FFMPEG_PATH=C:\tools\ffmpeg.exe
 ```
+
+YouTube 側で bot 確認が出る場合は、`yt-dlp` に browser cookies を渡してください。
+
+```bash
+YT_DLP_COOKIES_FROM_BROWSER=chrome
+```
+
+Chrome ではなく Edge を使う場合は `edge` に変えてください。cookies.txt を使う場合は `YT_DLP_COOKIES_PATH` も使えます。
 
 ## 開発
 

@@ -29,6 +29,7 @@ export async function importYouTubeVideo(options: {
   const outputTemplate = path.join(jobDir, "%(id)s.%(ext)s");
   const ytDlpPath = process.env.YT_DLP_PATH || "yt-dlp";
   const ffmpegPath = process.env.FFMPEG_PATH || "ffmpeg";
+  const cookieArgs = getYtDlpCookieArgs();
   const maxFilesizeMb =
     parsePositiveInteger(process.env.YT_DLP_MAX_FILESIZE_MB) ?? DEFAULT_MAX_FILESIZE_MB;
 
@@ -36,6 +37,7 @@ export async function importYouTubeVideo(options: {
 
   try {
     const importedPath = await downloadVideoWithRetry({
+      cookieArgs,
       ffmpegPath,
       jobDir,
       maxFilesizeMb,
@@ -56,6 +58,7 @@ export async function importYouTubeVideo(options: {
 }
 
 async function downloadVideoWithRetry(options: {
+  cookieArgs: string[];
   ffmpegPath: string;
   jobDir: string;
   maxFilesizeMb: number;
@@ -74,6 +77,7 @@ async function downloadVideoWithRetry(options: {
         [
           "--no-playlist",
           "--no-warnings",
+          ...options.cookieArgs,
           "--print",
           "after_move:filepath",
           "-o",
@@ -152,7 +156,7 @@ async function runCommand(command: string, args: string[], cwd: string) {
       }
 
       const detail = stderr.trim() || stdout.trim() || `exit code ${code}`;
-      reject(new Error(`yt-dlp の実行に失敗しました: ${detail}`));
+      reject(new Error(formatYtDlpError(detail)));
     });
   });
 }
@@ -211,4 +215,51 @@ function isVideoContainer(fileNameOrPath: string) {
   const lowered = fileNameOrPath.toLowerCase();
   if (lowered.endsWith(".part")) return false;
   return VIDEO_EXTENSIONS.has(path.extname(lowered));
+}
+
+function getYtDlpCookieArgs() {
+  const cookiesPath =
+    process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim();
+  if (cookiesPath) {
+    return ["--cookies", cookiesPath];
+  }
+
+  const cookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim();
+  if (cookiesFromBrowser) {
+    return ["--cookies-from-browser", cookiesFromBrowser];
+  }
+
+  return [];
+}
+
+function formatYtDlpError(detail: string) {
+  if (/Sign in to confirm you.+not a bot/i.test(detail)) {
+    return [
+      "yt-dlp の実行に失敗しました: YouTube 側で bot 確認が必要です。",
+      "Edge を完全に終了したうえで `YT_DLP_COOKIES_FROM_BROWSER=edge` を使うか、",
+      "`YT_DLP_COOKIES_PATH` に cookies.txt を指定してください。",
+      `詳細: ${detail}`,
+    ].join(" ");
+  }
+
+  if (/Failed to decrypt with DPAPI/i.test(detail)) {
+    return [
+      "yt-dlp の実行に失敗しました: ブラウザ cookies の復号に失敗しました。",
+      "この環境では Chrome cookies の自動読込が失敗しています。",
+      "Edge を完全に終了して `YT_DLP_COOKIES_FROM_BROWSER=edge` を使うか、",
+      "`YT_DLP_COOKIES_PATH` に cookies.txt を指定してください。",
+      `詳細: ${detail}`,
+    ].join(" ");
+  }
+
+  if (/Could not copy Chrome cookie database/i.test(detail)) {
+    return [
+      "yt-dlp の実行に失敗しました: ブラウザ cookies DB を開けませんでした。",
+      "Edge または Chrome を完全に終了して再試行するか、",
+      "`YT_DLP_COOKIES_PATH` に cookies.txt を指定してください。",
+      `詳細: ${detail}`,
+    ].join(" ");
+  }
+
+  return `yt-dlp の実行に失敗しました: ${detail}`;
 }
