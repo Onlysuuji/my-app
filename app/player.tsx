@@ -52,7 +52,6 @@ export default function Player() {
   const playStartTokenRef = useRef(0);
 
   const urlForCleanup = useRef<string | null>(null);
-  const [isVideoFullscreen, setIsVideoFullscreen] = useState(false);
 
   // ファイル選択
   const onPickFile = (file: File | null) => {
@@ -356,27 +355,6 @@ export default function Player() {
     }
   }, [srcUrl]);
 
-  useEffect(() => {
-    const onFullscreenStateChange = () => {
-      const fullscreenEl = document.fullscreenElement;
-      setIsVideoFullscreen(fullscreenEl === videoRef.current);
-    };
-    const onBeginFullscreen = () => setIsVideoFullscreen(true);
-    const onEndFullscreen = () => setIsVideoFullscreen(false);
-    const v = videoRef.current;
-
-    document.addEventListener("fullscreenchange", onFullscreenStateChange);
-    // iOS Safari のネイティブ fullscreen 用
-    v?.addEventListener("webkitbeginfullscreen", onBeginFullscreen as EventListener);
-    v?.addEventListener("webkitendfullscreen", onEndFullscreen as EventListener);
-
-    return () => {
-      document.removeEventListener("fullscreenchange", onFullscreenStateChange);
-      v?.removeEventListener("webkitbeginfullscreen", onBeginFullscreen as EventListener);
-      v?.removeEventListener("webkitendfullscreen", onEndFullscreen as EventListener);
-    };
-  }, []);
-
   // アンマウント時の後始末
   useEffect(() => {
     return () => {
@@ -420,9 +398,9 @@ export default function Player() {
           controls
           style={{
             width: "100%",
-            height: isVideoFullscreen ? "100%" : "auto",
+            height: "auto",
             background: "#000",
-            objectFit: isVideoFullscreen ? "cover" : "contain",
+            objectFit: "contain",
           }}
           onSeeked={onVideoSeeked}
           onPlay={startFromVideo}
