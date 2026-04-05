@@ -63,6 +63,12 @@ FFMPEG_PATH=C:\tools\ffmpeg.exe
 YT_DLP_COOKIES_FROM_BROWSER=edge
 ```
 
+指定がなくても、ローカルでは `edge,chrome` の順で `--cookies-from-browser` を自動で試します。順番を変えたいときは次を使ってください。
+
+```bash
+YT_DLP_LOCAL_BROWSER_COOKIE_FALLBACKS=edge,chrome
+```
+
 公開環境では `YT_DLP_COOKIES_FROM_BROWSER` は使わず、必要なら `cookies.txt` を指定してください。
 
 ```bash

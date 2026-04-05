@@ -31,6 +31,11 @@ type ProbedMediaStreams = {
   hasVideo: boolean;
 };
 
+type CookieAuthStrategy = {
+  args: string[];
+  label: string;
+};
+
 type ImportErrorCode =
   | "IMPORT_BUSY"
   | "IMPORT_CONFIG"
@@ -64,9 +69,9 @@ export async function importYouTubeVideo(options: {
   return withImportSlot(async () => {
     const jobDir = path.join(TMP_ROOT, randomUUID());
     const outputTemplate = path.join(jobDir, "%(id)s.%(ext)s");
-    const ytDlpPath = process.env.YT_DLP_PATH || "yt-dlp";
-    const ffmpegPath = process.env.FFMPEG_PATH || "ffmpeg";
-    const configuredCookieArgs = getYtDlpCookieArgs();
+    const ytDlpPath = await resolveExecutablePath("YT_DLP_PATH", "yt-dlp");
+    const ffmpegPath = await resolveExecutablePath("FFMPEG_PATH", "ffmpeg");
+    const cookieAuthStrategies = getYtDlpCookieStrategies();
     const maxFilesizeMb =
       parsePositiveInteger(process.env.YT_DLP_MAX_FILESIZE_MB) ?? DEFAULT_MAX_FILESIZE_MB;
     const timeoutMs = parsePositiveInteger(process.env.YT_DLP_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
@@ -76,7 +81,7 @@ export async function importYouTubeVideo(options: {
 
     try {
       const importedPath = await downloadVideoWithRetry({
-        configuredCookieArgs,
+        cookieAuthStrategies,
         ffmpegPath,
         jobDir,
         maxFilesizeMb,
@@ -102,7 +107,7 @@ export async function importYouTubeVideo(options: {
 }
 
 async function downloadVideoWithRetry(options: {
-  configuredCookieArgs: string[];
+  cookieAuthStrategies: CookieAuthStrategy[];
   ffmpegPath: string;
   jobDir: string;
   maxFilesizeMb: number;
@@ -119,7 +124,7 @@ async function downloadVideoWithRetry(options: {
     });
   } catch (error) {
     if (
-      !options.configuredCookieArgs.length ||
+      !options.cookieAuthStrategies.length ||
       !(error instanceof Error) ||
       !shouldRetryWithCookies(error)
     ) {
@@ -127,11 +132,39 @@ async function downloadVideoWithRetry(options: {
     }
   }
 
-  return downloadVideoWithSelectors({
-    ...options,
-    cookieArgs: options.configuredCookieArgs,
-    label: "cookies",
-  });
+  let lastCookieError: Error | null = null;
+
+  for (const strategy of options.cookieAuthStrategies) {
+    try {
+      return await downloadVideoWithSelectors({
+        ...options,
+        cookieArgs: strategy.args,
+        label: strategy.label,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /Requested format is not available/i.test(error.message)
+      ) {
+        const cookieFormatError = await diagnoseCookieFormatFailure({
+          cookieArgs: strategy.args,
+          strategyLabel: strategy.label,
+          timeoutMs: options.timeoutMs,
+          url: options.url,
+          ytDlpPath: options.ytDlpPath,
+        });
+
+        if (cookieFormatError) {
+          lastCookieError = new Error(cookieFormatError);
+          continue;
+        }
+      }
+
+      lastCookieError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  throw lastCookieError ?? new Error("YouTube import failed.");
 }
 
 async function downloadVideoWithSelectors(options: {
@@ -507,6 +540,56 @@ async function probeMediaStreams(importedPath: string, ffmpegPath: string) {
   };
 }
 
+async function diagnoseCookieFormatFailure(options: {
+  cookieArgs: string[];
+  strategyLabel: string;
+  timeoutMs: number;
+  url: string;
+  ytDlpPath: string;
+}) {
+  try {
+    const result = await runCommand(
+      options.ytDlpPath,
+      ["--no-playlist", "--no-warnings", ...options.cookieArgs, "--list-formats", options.url],
+      REPO_ROOT,
+      Math.min(options.timeoutMs, 60_000)
+    );
+    const detail = `${result.stdout}\n${result.stderr}`;
+
+    if (hasOnlyStoryboardFormats(detail)) {
+      return buildCookieFormatErrorMessage(options.strategyLabel);
+    }
+  } catch {
+    // Keep the original selector failure if the diagnostic probe also fails.
+  }
+
+  return null;
+}
+
+function hasOnlyStoryboardFormats(detail: string) {
+  const formatRows = detail
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith("[youtube]") && !line.startsWith("[info]"))
+    .filter((line) => !/^ID\s+EXT/i.test(line) && !/^-{3,}$/.test(line));
+
+  return formatRows.length > 0 && formatRows.every((line) => /storyboard/i.test(line));
+}
+
+function buildCookieFormatErrorMessage(strategyLabel: string) {
+  if (strategyLabel === "cookies-file") {
+    return "現在の cookies.txt ではこの動画の動画/音声フォーマットを取得できません。cookies.txt を更新して再試行してください。";
+  }
+
+  const browserMatch = strategyLabel.match(/^browser-(.+)$/);
+  if (browserMatch) {
+    return `${browserMatch[1]} のブラウザ cookies ではこの動画の動画/音声フォーマットを取得できません。ブラウザを閉じて再試行するか、cookies.txt を更新してください。`;
+  }
+
+  return "自動取得した cookies ではこの動画の動画/音声フォーマットを取得できません。ブラウザを閉じて再試行するか、cookies.txt を更新してください。";
+}
+
 function wait(ms: number) {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
@@ -541,12 +624,160 @@ function parsePositiveInteger(value: string | undefined) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+async function resolveExecutablePath(envName: string, fallbackCommand: string) {
+  const candidates = [
+    process.env[envName]?.trim(),
+    await readEnvFileValue(envName),
+    fallbackCommand,
+  ].filter((value): value is string => Boolean(value));
+
+  for (const candidate of candidates) {
+    if (await isExecutableCandidateUsable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return fallbackCommand;
+}
+
+async function isExecutableCandidateUsable(candidate: string) {
+  if (!looksLikeFilePath(candidate)) {
+    return true;
+  }
+
+  try {
+    await fs.access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeFilePath(value: string) {
+  return (
+    value.includes("\\") ||
+    value.includes("/") ||
+    /^[A-Za-z]:/.test(value) ||
+    value.startsWith(".")
+  );
+}
+
+let envFileEntriesPromise: Promise<Map<string, string>> | null = null;
+
+async function readEnvFileValue(key: string) {
+  const entries = await loadEnvFileEntries();
+  return entries.get(key)?.trim();
+}
+
+async function loadEnvFileEntries() {
+  if (!envFileEntriesPromise) {
+    envFileEntriesPromise = readEnvFiles();
+  }
+
+  return envFileEntriesPromise;
+}
+
+async function readEnvFiles() {
+  const entries = new Map<string, string>();
+  const files = [".env", ".env.production", ".env.local"];
+
+  for (const fileName of files) {
+    const filePath = path.join(REPO_ROOT, fileName);
+    const content = await fs.readFile(filePath, "utf8").catch(() => null);
+    if (!content) continue;
+
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) continue;
+
+      const name = trimmed.slice(0, separatorIndex).trim();
+      const rawValue = trimmed.slice(separatorIndex + 1).trim();
+      entries.set(name, stripEnvWrappingQuotes(rawValue));
+    }
+  }
+
+  return entries;
+}
+
+function stripEnvWrappingQuotes(value: string) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+
+  return value;
+}
+
 function isVideoContainer(fileNameOrPath: string) {
   const lowered = fileNameOrPath.toLowerCase();
   if (lowered.endsWith(".part")) return false;
   return VIDEO_EXTENSIONS.has(path.extname(lowered));
 }
 
+function getYtDlpCookieStrategies() {
+  const strategies: CookieAuthStrategy[] = [];
+  const cookiesPath =
+    process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim();
+  const cookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim();
+
+  if (cookiesFromBrowser && process.env.NODE_ENV === "production") {
+    throw new YouTubeImportError(
+      "Production では `YT_DLP_COOKIES_FROM_BROWSER` を使えません。`YT_DLP_COOKIES_PATH` を使ってください。",
+      { code: "IMPORT_CONFIG", status: 500 }
+    );
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    for (const browser of getLocalBrowserCookieFallbacks(cookiesFromBrowser)) {
+      strategies.push({
+        args: ["--cookies-from-browser", browser],
+        label: `browser-${browser}`,
+      });
+    }
+  }
+
+  if (cookiesPath) {
+    strategies.push({
+      args: ["--cookies", cookiesPath],
+      label: "cookies-file",
+    });
+  }
+
+  return dedupeCookieStrategies(strategies);
+}
+
+function getLocalBrowserCookieFallbacks(primaryBrowser: string | undefined) {
+  const configured =
+    process.env.YT_DLP_LOCAL_BROWSER_COOKIE_FALLBACKS?.split(",")
+      .map((value) => value.trim())
+      .filter(Boolean) ?? [];
+  const ordered = [primaryBrowser, ...configured, "edge", "chrome"];
+  return ordered.filter(
+    (browser, index): browser is string =>
+      Boolean(browser) && ordered.indexOf(browser) === index
+  );
+}
+
+function dedupeCookieStrategies(strategies: CookieAuthStrategy[]) {
+  const seen = new Set<string>();
+  return strategies.filter((strategy) => {
+    const key = strategy.args.join("\u0000");
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+// Legacy helper kept temporarily to avoid large-scale rewrites while the local-only
+// browser-cookie fallback is being phased in.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function getYtDlpCookieArgs() {
   const cookiesPath =
     process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim();

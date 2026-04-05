@@ -815,7 +815,7 @@ export default function Player() {
                         : "border-slate-200 hover:border-slate-400"
                     } disabled:cursor-wait disabled:opacity-70`}
                   >
-                    <div className="overflow-hidden rounded-md bg-slate-100">
+                    <div className="relative overflow-hidden rounded-md bg-slate-100">
                       <Image
                         src={item.thumbnailUrl}
                         alt={item.title}
@@ -823,11 +823,17 @@ export default function Player() {
                         height={180}
                         className="h-auto w-full"
                       />
+                      {item.durationText && (
+                        <span className="absolute bottom-2 right-2 rounded bg-black/80 px-2 py-1 text-xs font-semibold text-white">
+                          {item.durationText}
+                        </span>
+                      )}
                     </div>
                     <div className="grid gap-2">
                       <div className="font-medium text-slate-900">{item.title}</div>
                       <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
                         <span>{item.channelTitle}</span>
+                        {item.durationText && <span>・{item.durationText}</span>}
                         {isImportingThisItem && (
                           <span className="font-semibold text-emerald-700">取り込み中…</span>
                         )}
@@ -954,6 +960,14 @@ export default function Player() {
                 />
                 <button
                   type="button"
+                  onClick={() => setPlaybackRate(1.0)}
+                  disabled={localControlsDisabled}
+                  className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:border-slate-400 disabled:opacity-60"
+                >
+                  リセット
+                </button>
+                <button
+                  type="button"
                   aria-label="再生速度を上げる"
                   onClick={() => setPlaybackRate((r) => clamp(r + 0.05, 0.1, 2.0))}
                   disabled={localControlsDisabled}
@@ -990,6 +1004,14 @@ export default function Player() {
                     disabled={localControlsDisabled}
                     style={{ flex: 1, minWidth: 260, height: 28 }}
                   />
+                  <button
+                    type="button"
+                    onClick={() => setOffsetSec(0)}
+                    disabled={localControlsDisabled}
+                    className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:border-slate-400 disabled:opacity-60"
+                  >
+                    リセット
+                  </button>
                   <button
                     type="button"
                     aria-label="音声オフセットを上げる"

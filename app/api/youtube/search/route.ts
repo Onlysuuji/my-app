@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   buildYouTubeWatchUrl,
+  formatDurationClock,
+  parseYouTubeDuration,
   pickBestThumbnail,
   type YouTubeVideoSummary,
 } from "@/app/lib/youtube";
@@ -23,6 +25,15 @@ type YouTubeSearchResponse = {
   error?: {
     message?: string;
   };
+};
+
+type YouTubeVideosResponse = {
+  items?: Array<{
+    id?: string;
+    contentDetails?: {
+      duration?: string;
+    };
+  }>;
 };
 
 export const runtime = "nodejs";
@@ -94,11 +105,62 @@ export async function GET(request: NextRequest) {
       return acc;
     }, []);
 
+    if (items.length > 0) {
+      const durations = await fetchVideoDurations({
+        apiKey,
+        referer,
+        videoIds: items.map((item) => item.videoId),
+      });
+
+      for (const item of items) {
+        const durationSec = durations.get(item.videoId);
+        if (durationSec === undefined) continue;
+        item.durationSec = durationSec;
+        item.durationText = formatDurationClock(durationSec) ?? undefined;
+      }
+    }
+
     return NextResponse.json({ items });
   } catch {
     return NextResponse.json(
       { error: "YouTube API への接続に失敗しました。" },
       { status: 502 }
     );
+  }
+}
+
+async function fetchVideoDurations(options: {
+  apiKey: string;
+  referer: string | null;
+  videoIds: string[];
+}) {
+  const endpoint = new URL("https://www.googleapis.com/youtube/v3/videos");
+  endpoint.searchParams.set("part", "contentDetails");
+  endpoint.searchParams.set("id", options.videoIds.join(","));
+  endpoint.searchParams.set("key", options.apiKey);
+
+  try {
+    const response = await fetch(endpoint, {
+      cache: "no-store",
+      headers: options.referer ? { Referer: options.referer } : undefined,
+    });
+
+    if (!response.ok) {
+      return new Map<string, number>();
+    }
+
+    const payload = (await response.json()) as YouTubeVideosResponse;
+    const durations = new Map<string, number>();
+
+    for (const item of payload.items ?? []) {
+      if (!item.id) continue;
+      const durationSec = parseYouTubeDuration(item.contentDetails?.duration);
+      if (durationSec === null) continue;
+      durations.set(item.id, durationSec);
+    }
+
+    return durations;
+  } catch {
+    return new Map<string, number>();
   }
 }

@@ -6,6 +6,8 @@ export type YouTubeVideoSummary = {
   description: string;
   thumbnailUrl: string;
   publishedAt?: string;
+  durationSec?: number;
+  durationText?: string;
 };
 
 const YOUTUBE_HOSTS = new Set([
@@ -83,6 +85,37 @@ export function pickBestThumbnail(
     thumbnails.default?.url ??
     buildYouTubeThumbnailUrl(videoId)
   );
+}
+
+export function parseYouTubeDuration(input: string | undefined) {
+  if (!input) return null;
+
+  const match = input.match(/^P(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)$/);
+  if (!match) return null;
+
+  const hours = Number.parseInt(match[1] ?? "0", 10);
+  const minutes = Number.parseInt(match[2] ?? "0", 10);
+  const seconds = Number.parseInt(match[3] ?? "0", 10);
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+export function formatDurationClock(totalSeconds: number | null | undefined) {
+  if (!Number.isFinite(totalSeconds) || totalSeconds === null || totalSeconds === undefined) {
+    return null;
+  }
+
+  const wholeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const seconds = wholeSeconds % 60;
+  const minutes = Math.floor(wholeSeconds / 60) % 60;
+  const hours = Math.floor(wholeSeconds / 3600);
+
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds
+      .toString()
+      .padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function sanitizeVideoId(value: string) {
