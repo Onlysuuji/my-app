@@ -592,6 +592,74 @@ export default function Player() {
       if (event.ctrlKey || event.altKey || event.metaKey) return;
       if (isEditableElement(event.target)) return;
 
+      const lowerKey = event.key.toLowerCase();
+      if (lowerKey === "q") {
+        event.preventDefault();
+        setOffsetSec((value) => clamp(value - 0.005, -0.3, 0.3));
+        return;
+      }
+      if (lowerKey === "e") {
+        event.preventDefault();
+        setOffsetSec((value) => clamp(value + 0.005, -0.3, 0.3));
+        return;
+      }
+      if (lowerKey === "a") {
+        event.preventDefault();
+        setPlaybackRate((value) => clamp(value - 0.05, 0.1, 2.0));
+        return;
+      }
+      if (lowerKey === "d") {
+        event.preventDefault();
+        setPlaybackRate((value) => clamp(value + 0.05, 0.1, 2.0));
+        return;
+      }
+      if (lowerKey === "f") {
+        const video = videoRef.current;
+        if (!video) return;
+
+        event.preventDefault();
+        if (document.fullscreenElement === video) {
+          void document.exitFullscreen().catch(() => {});
+          return;
+        }
+
+        void video.requestFullscreen().catch(() => {});
+        return;
+      }
+      if (event.code === "Space") {
+        const video = videoRef.current;
+        if (!video) return;
+
+        event.preventDefault();
+        if (video.paused) {
+          void video.play().catch(() => {});
+          return;
+        }
+
+        video.pause();
+        return;
+      }
+      if (lowerKey === "b") {
+        const video = videoRef.current;
+        if (!video) return;
+
+        event.preventDefault();
+        const timeSec = roundBookmarkTime(video.currentTime);
+        setBookmarks((current) =>
+          [...current, { id: createBookmarkId(), timeSec }].sort((a, b) => a.timeSec - b.timeSec)
+        );
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        const video = videoRef.current;
+        if (!video) return;
+
+        event.preventDefault();
+        const delta = event.key === "ArrowLeft" ? -5 : 5;
+        video.currentTime = clamp(video.currentTime + delta, 0, video.duration || Infinity);
+        return;
+      }
+
       const bookmarkIndex = getBookmarkIndexFromShortcut(event);
       if (bookmarkIndex === null) return;
 
@@ -1166,6 +1234,13 @@ export default function Player() {
             <p className="text-xs text-slate-500">
               `1` から `9`、`0` で 10 件目へ移動できます。
             </p>
+            <p className="text-xs text-slate-500">
+              `q/e` でオフセット、`a/d` で再生速度を調整できます。
+            </p>
+            <p className="text-xs text-slate-500">`f` でフルスクリーン切替ができます。</p>
+            <p className="text-xs text-slate-500">`Space` で再生 / 一時停止できます。</p>
+            <p className="text-xs text-slate-500">`b` で現在位置をブックマーク保存できます。</p>
+            <p className="text-xs text-slate-500">左右矢印で 5 秒前 / 5 秒後へ移動できます。</p>
           </div>
           <button
             type="button"
