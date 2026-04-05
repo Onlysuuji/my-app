@@ -14,6 +14,7 @@ import {
 } from "./lib/youtube";
 
 type SourceMode = "local" | "youtube-url" | "youtube-search";
+type SourceOrigin = "local" | "youtube";
 
 type SearchYouTubeResponse = {
   items?: YouTubeVideoSummary[];
@@ -24,6 +25,8 @@ type PlaybackBookmark = {
   id: string;
   timeSec: number;
 };
+
+const YOUTUBE_IMPORT_BASELINE_OFFSET_SEC = -0.05;
 
 // 同期方式は seekSync のみ使用
 const iconButtonStyle: React.CSSProperties = {
@@ -53,6 +56,7 @@ export default function Player() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [sourceMode, setSourceMode] = useState<SourceMode>("local");
+  const [sourceOrigin, setSourceOrigin] = useState<SourceOrigin>("local");
   const [srcUrl, setSrcUrl] = useState<string | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [youtubeSource, setYoutubeSource] = useState<YouTubeVideoSummary | null>(null);
@@ -97,6 +101,7 @@ export default function Player() {
   const youtubeSourceReady = sourceMode !== "local" && youtubeSource !== null;
   const localControlsDisabled = !localSourceReady;
   const usesDetachedAudio = localSourceReady;
+  const effectiveOffsetSec = offsetSec + getSourceBaselineOffsetSec(sourceOrigin);
 
   const syncLocalFileInput = (file: File | null) => {
     const input = fileInputRef.current;
@@ -151,6 +156,7 @@ export default function Player() {
     file: File | null,
     options?: {
       keepCurrentTab?: boolean;
+      sourceOrigin?: SourceOrigin;
     }
   ) => {
     if (!file) return;
@@ -168,6 +174,7 @@ export default function Player() {
     }
     setSrcUrl(url);
     setSourceFile(file);
+    setSourceOrigin(options?.sourceOrigin ?? "local");
     setYoutubeSource(null);
     setYoutubeWarning(null);
     setYoutubeImportError(null);
@@ -233,7 +240,7 @@ export default function Player() {
       const blob = await exportVideoWithOffset({
         file: sourceFile,
         playbackRate,
-        offsetSec,
+        offsetSec: effectiveOffsetSec,
         trimStartSec,
         trimEndSec,
         exportResolution,
@@ -253,7 +260,7 @@ export default function Player() {
       const rateTag =
         Math.abs(playbackRate - 1.0) > 1e-6 ? `_rate${playbackRate.toFixed(2)}` : "";
       const offsetTag =
-        Math.abs(offsetSec) > 1e-6 ? `_offset${offsetSec.toFixed(3)}` : "";
+        Math.abs(effectiveOffsetSec) > 1e-6 ? `_offset${effectiveOffsetSec.toFixed(3)}` : "";
       const resolutionTag =
         exportResolution === "source" ? "_source" : `_${exportResolution}`;
       const fileName = `${originalName}${rateTag}${offsetTag}${resolutionTag}.mp4`;
@@ -291,7 +298,7 @@ export default function Player() {
     // まず合わせる
     safeSetCurrentTime(
       a,
-      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
       seekTokenRef
     );
 
@@ -309,7 +316,7 @@ export default function Player() {
           if (!vNow || !aNow) return;
           safeSetCurrentTime(
             aNow,
-            clamp(vNow.currentTime - offsetSec, 0, aNow.duration || Infinity),
+            clamp(vNow.currentTime - effectiveOffsetSec, 0, aNow.duration || Infinity),
             seekTokenRef
           );
         });
@@ -446,7 +453,7 @@ export default function Player() {
         type: blob.type || "video/mp4",
       });
 
-      onPickFile(importedFile, { keepCurrentTab: true });
+      onPickFile(importedFile, { keepCurrentTab: true, sourceOrigin: "youtube" });
     } catch (err) {
       const error =
         err instanceof Error ? err : new Error("YouTube 動画の取り込みに失敗しました。");
@@ -482,10 +489,10 @@ export default function Player() {
 
     safeSetCurrentTime(
       a,
-      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
       seekTokenRef
     );
-  }, [localSourceReady, offsetSec, playing, usesDetachedAudio]);
+  }, [effectiveOffsetSec, localSourceReady, playing, usesDetachedAudio]);
 
   // 再生速度反映
   useEffect(() => {
@@ -523,7 +530,7 @@ export default function Player() {
       }
 
       // audioTime = videoTime - offsetSec
-      const expectedAudio = v.currentTime - offsetSec;
+      const expectedAudio = v.currentTime - effectiveOffsetSec;
       const diff = a.currentTime - expectedAudio;
 
       // 100msごとにズレを判定して、大きい時だけジャンプ補正
@@ -546,7 +553,7 @@ export default function Player() {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     };
-  }, [localSourceReady, playing, offsetSec, playbackRate, usesDetachedAudio]);
+  }, [effectiveOffsetSec, localSourceReady, playbackRate, playing, usesDetachedAudio]);
 
   // シーク時の追従（ドラッグ中は無視）
   const onVideoSeeked = () => {
@@ -559,7 +566,7 @@ export default function Player() {
 
     safeSetCurrentTime(
       a,
-      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
       seekTokenRef
     );
   };
@@ -574,10 +581,33 @@ export default function Player() {
 
     safeSetCurrentTime(
       a,
-      clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
       seekTokenRef
     );
   };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!localSourceReady) return;
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (isEditableElement(event.target)) return;
+
+      const bookmarkIndex = getBookmarkIndexFromShortcut(event);
+      if (bookmarkIndex === null) return;
+
+      const bookmark = bookmarks[bookmarkIndex];
+      const video = videoRef.current;
+      if (!bookmark || !video) return;
+
+      event.preventDefault();
+      video.currentTime = clamp(bookmark.timeSec, 0, video.duration || Infinity);
+    };
+
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [bookmarks, localSourceReady]);
 
   // src URL 更新
   useEffect(() => {
@@ -657,7 +687,7 @@ export default function Player() {
       a.playbackRate = playbackRate;
       safeSetCurrentTime(
         a,
-        clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+        clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
         seekTokenRef
       );
       void a.play().catch((err) => {
@@ -667,7 +697,7 @@ export default function Player() {
         }
       });
     }
-  }, [localSourceReady, offsetSec, playbackRate, playing, usesDetachedAudio]);
+  }, [effectiveOffsetSec, localSourceReady, playbackRate, playing, usesDetachedAudio]);
 
   // アンマウント時の後始末
   useEffect(() => {
@@ -1022,6 +1052,11 @@ export default function Player() {
                     <PlusIcon />
                   </button>
                 </div>
+                {sourceOrigin === "youtube" && (
+                  <p className="text-xs text-slate-500">
+                    YouTube 取り込み時は基準補正 {YOUTUBE_IMPORT_BASELINE_OFFSET_SEC.toFixed(3)} 秒を自動適用しています。
+                  </p>
+                )}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <span>選択範囲:</span>
@@ -1128,6 +1163,9 @@ export default function Player() {
             <p className="text-xs text-slate-500">
               現在位置を保存して、クリックでその時間へ移動できます。
             </p>
+            <p className="text-xs text-slate-500">
+              `1` から `9`、`0` で 10 件目へ移動できます。
+            </p>
           </div>
           <button
             type="button"
@@ -1146,7 +1184,10 @@ export default function Player() {
                     onClick={() => jumpToBookmark(bookmark.timeSec)}
                     className="grid flex-1 gap-1 rounded-lg border border-slate-200 px-3 py-2 text-left hover:border-slate-400"
                   >
-                    <span className="text-xs text-slate-500">#{index + 1}</span>
+                    <span className="text-xs text-slate-500">
+                      #{index + 1}
+                      {index < 10 ? ` / ${index === 9 ? 0 : index + 1}` : ""}
+                    </span>
                     <span className="font-mono text-sm text-slate-900">
                       {formatBookmarkTime(bookmark.timeSec)}
                     </span>
@@ -1326,6 +1367,10 @@ function formatBookmarkTime(value: number) {
   return base;
 }
 
+function getSourceBaselineOffsetSec(sourceOrigin: SourceOrigin) {
+  return sourceOrigin === "youtube" ? YOUTUBE_IMPORT_BASELINE_OFFSET_SEC : 0;
+}
+
 function MinusIcon() {
   return (
     <svg
@@ -1377,6 +1422,30 @@ function parseFileNameFromContentDisposition(header: string | null) {
 
   const simpleMatch = header.match(/filename="([^"]+)"/i);
   return simpleMatch?.[1] ?? null;
+}
+
+function getBookmarkIndexFromShortcut(event: KeyboardEvent) {
+  const key = event.key;
+  if (!/^\d$/.test(key)) return null;
+
+  const numeric = Number.parseInt(key, 10);
+  if (!Number.isFinite(numeric)) return null;
+
+  return numeric === 0 ? 9 : numeric - 1;
+}
+
+function isEditableElement(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  const tagName = target.tagName;
+  return (
+    target.isContentEditable ||
+    tagName === "INPUT" ||
+    tagName === "TEXTAREA" ||
+    tagName === "SELECT"
+  );
 }
 
 /**
