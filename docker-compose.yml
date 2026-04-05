@@ -1,0 +1,30 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.production
+    environment:
+      YOUTUBE_IMPORT_TMP_ROOT: /tmp/youtube-imports
+      YT_DLP_PATH: yt-dlp
+      FFMPEG_PATH: ffmpeg
+    expose:
+      - "3000"
+    volumes:
+      - app_tmp:/tmp/youtube-imports
+      - ./secrets:/run/secrets:ro
+    restart: unless-stopped
+
+  proxy:
+    image: nginx:1.27-alpine
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+volumes:
+  app_tmp:

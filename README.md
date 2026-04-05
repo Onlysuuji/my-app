@@ -1,25 +1,25 @@
 # Video + Audio Offset Player
 
-ローカル MP4 や YouTube 動画を取り込み、音声オフセット調整、再生速度変更、トリム、FFmpeg ベースの書き出しを行う Next.js アプリです。
+ローカル MP4 と YouTube 動画を読み込み、音声オフセット、再生速度、トリム、書き出しを行う Next.js アプリです。
 
 ## 機能
 
 ### ローカルファイル
 
-- MP4 を直接読み込み
+- MP4 の読み込み
 - 音声オフセット調整
 - 再生速度変更
 - トリム範囲設定
-- FFmpeg 書き出し
+- FFmpeg を使った書き出し
 
 ### YouTube
 
-- YouTube URL の解決
+- YouTube URL の読み込み
 - YouTube 検索
-- 埋め込みプレビュー
-- `yt-dlp` を使った MP4 取り込み
+- クリックで取り込み
+- `yt-dlp` を使った MP4 取得
 
-取り込んだ後はローカル MP4 と同じフローに入り、オフセット調整や書き出しが使えます。
+YouTube から取り込んだ動画は、そのままローカルファイル入力として扱われるので、ローカル MP4 と同じ編集機能が使えます。
 
 ## セットアップ
 
@@ -27,7 +27,7 @@
 npm install
 ```
 
-`.env.example` を参考に `.env.local` を作成します。
+`.env.example` を参考に `.env.local` を作成してください。
 
 ```bash
 youtube_api_key=your_youtube_data_api_key_here
@@ -35,33 +35,58 @@ youtube_api_referer=http://localhost:3000/
 YT_DLP_PATH=yt-dlp
 FFMPEG_PATH=ffmpeg
 YT_DLP_MAX_FILESIZE_MB=250
-YT_DLP_COOKIES_FROM_BROWSER=chrome
+YT_DLP_TIMEOUT_MS=300000
+YOUTUBE_IMPORT_MAX_CONCURRENT=2
 ```
 
-`youtube_api_key` を優先して読み込みます。後方互換のため `YOUTUBE_API_KEY` も利用できます。
-HTTP リファラー制限付きのキーを使う場合は `youtube_api_referer` を設定すると、サーバーからの YouTube API 呼び出しでも `Referer` を付与できます。
+`youtube_api_key` を設定すると YouTube 検索が使えます。既存設定との互換のため `YOUTUBE_API_KEY` も読みますが、新規設定は `youtube_api_key` を使ってください。
 
-### 必要な外部ツール
+`youtube_api_referer` を設定すると、サーバー側から YouTube Data API を呼ぶときにも `Referer` を付けます。Google Cloud Console 側の許可リファラーと一致させてください。
+
+### 必要なツール
 
 - `yt-dlp`
 - `ffmpeg`
 
 どちらも PATH に通すか、`.env.local` で実行ファイルパスを指定してください。
 
-例:
-
 ```bash
 YT_DLP_PATH=C:\tools\yt-dlp.exe
 FFMPEG_PATH=C:\tools\ffmpeg.exe
 ```
 
-YouTube 側で bot 確認が出る場合は、`yt-dlp` に browser cookies を渡してください。
+### cookies
+
+ローカル開発中だけ browser cookies 自動読み込みを使えます。
 
 ```bash
-YT_DLP_COOKIES_FROM_BROWSER=chrome
+YT_DLP_COOKIES_FROM_BROWSER=edge
 ```
 
-Chrome ではなく Edge を使う場合は `edge` に変えてください。cookies.txt を使う場合は `YT_DLP_COOKIES_PATH` も使えます。
+公開環境では `YT_DLP_COOKIES_FROM_BROWSER` は使わず、必要なら `cookies.txt` を指定してください。
+
+```bash
+YT_DLP_COOKIES_PATH=/run/secrets/youtube-cookies.txt
+```
+
+## 公開前提の防御
+
+- `/api/youtube/search` に検索レート制限
+- `/api/youtube/resolve` に同一オリジン検証と取り込みレート制限
+- `videoId` から正規の watch URL を再構築して `yt-dlp` に渡す
+- 公開環境では `YT_DLP_COOKIES_FROM_BROWSER` を禁止
+- `yt-dlp` 実行にタイムアウトを設定
+- 取り込み同時実行数を制限
+- ダウンロード後に実ファイルサイズを再検証
+- 取り込み結果はサーバーで検証後に返す
+- production では任意でサイト全体に Basic 認証を掛けられる
+
+関連する主な環境変数は次です。
+
+- `YT_DLP_MAX_FILESIZE_MB`: 取り込む動画の最大サイズ
+- `YT_DLP_TIMEOUT_MS`: 1 回の `yt-dlp` 実行タイムアウト
+- `YOUTUBE_IMPORT_MAX_CONCURRENT`: 同時に走らせる import の上限
+- `APP_BASIC_AUTH_USER` / `APP_BASIC_AUTH_PASSWORD`: production 用の Basic 認証
 
 ## 開発
 
@@ -69,7 +94,7 @@ Chrome ではなく Edge を使う場合は `edge` に変えてください。co
 npm run dev
 ```
 
-ブラウザで [http://localhost:3000](http://localhost:3000) を開きます。
+ブラウザで [http://localhost:3000](http://localhost:3000) を開いてください。
 
 ## 検証
 
@@ -78,10 +103,42 @@ npm run lint
 npm run build
 ```
 
-`public/ffmpeg/**` は配布済みバンドルのため、ESLint 対象から除外しています。
+## Docker 公開
 
-## 注意
+`.env.production.example` をコピーして `.env.production` を作り、本番値を設定します。
 
-- YouTube 取り込みはサーバー側で `yt-dlp` を実行します
-- 長い動画や大きい動画は `YT_DLP_MAX_FILESIZE_MB` によって失敗することがあります
-- 利用権限のある動画のみ扱ってください
+```bash
+docker compose build
+docker compose up -d
+```
+
+構成は次の 2 コンテナです。
+
+- `app`: Next.js + `ffmpeg` + `yt-dlp`
+- `proxy`: nginx。`/api/youtube/search` と `/api/youtube/resolve` に追加レート制限を適用
+
+### 本番用 cookies
+
+公開環境では `cookies.txt` を `./secrets/youtube-cookies.txt` に置き、`.env.production` に以下を設定してください。
+
+```bash
+YT_DLP_COOKIES_PATH=/run/secrets/youtube-cookies.txt
+```
+
+### Basic 認証
+
+production でサイト全体を Basic 認証で保護したい場合は、`.env.production` に次を設定してください。
+
+```bash
+APP_BASIC_AUTH_USER=admin
+APP_BASIC_AUTH_PASSWORD=replace_with_a_long_random_password
+```
+
+設定すると、画面と API の両方が認証対象になります。必ず HTTPS の前段プロキシ経由で公開してください。
+
+### 本番時の注意
+
+- HTTPS の前段プロキシで公開する
+- `youtube_api_referer` は公開 URL に合わせる
+- 単一インスタンス前提のメモリ制限なので、多段構成では外側でも rate limit を掛ける
+- 取り込み動画は一時的に `/tmp/youtube-imports` を使うため、十分なディスク容量が必要

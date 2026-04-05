@@ -49,7 +49,7 @@ const exportResolutionOptions: Array<{
 
 export default function Player() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [sourceMode, setSourceMode] = useState<SourceMode>("local");
@@ -82,11 +82,6 @@ export default function Player() {
   const [youtubeImportError, setYoutubeImportError] = useState<string | null>(null);
   const exportStartedAtRef = useRef(0);
   const exportProgressRef = useRef(0);
-
-  // WebAudio
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
-  const gainRef = useRef<GainNode | null>(null);
 
   // 同期ループ
   const rafRef = useRef<number | null>(null);
@@ -204,34 +199,6 @@ export default function Player() {
     setBookmarks((current) => current.filter((bookmark) => bookmark.id !== bookmarkId));
   };
 
-  // AudioContext 初期化
-  const ensureAudioGraph = async () => {
-    const audioEl = audioRef.current;
-    if (!audioEl) return;
-
-    if (!audioCtxRef.current) {
-      audioCtxRef.current = new AudioContext();
-    }
-    const ctx = audioCtxRef.current;
-
-    // Safari などで AudioContext が止まっている場合は resume
-    if (ctx.state === "suspended") {
-      await ctx.resume();
-    }
-
-    if (!mediaSourceRef.current) {
-      // objectURL なので crossOrigin は不要
-      mediaSourceRef.current = ctx.createMediaElementSource(audioEl);
-
-      gainRef.current = ctx.createGain();
-      gainRef.current.gain.value = 1.0;
-
-      // audioEl -> gain -> destination
-      mediaSourceRef.current.connect(gainRef.current);
-      gainRef.current.connect(ctx.destination);
-    }
-  };
-
   const onVideoPause = () => {
     playStartTokenRef.current += 1;
     const a = audioRef.current;
@@ -313,11 +280,10 @@ export default function Player() {
     if (!localSourceReady || !v || !a || !srcUrl) return;
     if (!a.paused) return;
 
-    await ensureAudioGraph();
-    await waitForMediaReady(a);
-
-    v.muted = true;
+    v.muted = false;
+    v.volume = usesDetachedAudio ? 0 : 1;
     a.muted = false;
+    a.volume = 1;
 
     v.playbackRate = playbackRate;
     a.playbackRate = playbackRate;
@@ -330,31 +296,32 @@ export default function Player() {
     );
 
     // onPlay で呼ばれるため video.play() は不要。audio.play() だけ同期して開始。
-    try {
-      await a.play();
-    } catch (err) {
+    const playPromise = a.play();
+    void playPromise
+      .then(() => {
+        if (startToken !== playStartTokenRef.current) return;
+
+        // 次フレームでもう一回合わせる（初期ズレ潰し）
+        requestAnimationFrame(() => {
+          if (startToken !== playStartTokenRef.current) return;
+          const vNow = videoRef.current;
+          const aNow = audioRef.current;
+          if (!vNow || !aNow) return;
+          safeSetCurrentTime(
+            aNow,
+            clamp(vNow.currentTime - offsetSec, 0, aNow.duration || Infinity),
+            seekTokenRef
+          );
+        });
+
+        setPlaying(true);
+      })
+      .catch((err) => {
       // 再生中断（pause 競合）による AbortError は想定内として握りつぶす
-      if (!isPlayInterruptedError(err)) {
-        console.error("audio play failed:", err);
-      }
-      return;
-    }
-    if (startToken !== playStartTokenRef.current) return;
-
-    // 次フレームでもう一回合わせる（初期ズレ潰し）
-    requestAnimationFrame(() => {
-      if (startToken !== playStartTokenRef.current) return;
-      const vNow = videoRef.current;
-      const aNow = audioRef.current;
-      if (!vNow || !aNow) return;
-      safeSetCurrentTime(
-        aNow,
-        clamp(vNow.currentTime - offsetSec, 0, aNow.duration || Infinity),
-        seekTokenRef
-      );
-    });
-
-    setPlaying(true);
+        if (!isPlayInterruptedError(err)) {
+          console.error("audio play failed:", err);
+        }
+      });
   };
 
   const resolveYouTubeUrl = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -525,9 +492,11 @@ export default function Player() {
     if (!localSourceReady) return;
     const v = videoRef.current;
     const a = audioRef.current;
-    if (!v || !a) return;
+    if (!v) return;
     v.playbackRate = playbackRate;
-    a.playbackRate = playbackRate;
+    if (usesDetachedAudio && a) {
+      a.playbackRate = playbackRate;
+    }
   }, [localSourceReady, playbackRate, usesDetachedAudio]);
 
   // 同期ループ（ドラッグ中は補正しない / 100ms判定でジャンプ補正のみ）
@@ -618,10 +587,23 @@ export default function Player() {
 
     if (localSourceReady && srcUrl) {
       v.src = srcUrl;
-      a.src = srcUrl;
-      v.muted = true;
+      v.muted = false;
+      v.volume = usesDetachedAudio ? 0 : 1;
+      v.load();
+
+      if (usesDetachedAudio) {
+        a.src = srcUrl;
+        a.muted = false;
+        a.volume = 1;
+        a.currentTime = 0;
+        a.load();
+      } else {
+        a.pause();
+        a.removeAttribute("src");
+        a.load();
+      }
+
       v.currentTime = 0;
-      a.currentTime = 0;
       return;
     }
 
@@ -665,32 +647,25 @@ export default function Player() {
     const a = audioRef.current;
     if (!v || !a || !localSourceReady) return;
 
-    v.muted = true;
+    v.muted = false;
+    v.volume = usesDetachedAudio ? 0 : 1;
     if (playing && a.paused) {
       const token = ++playStartTokenRef.current;
 
-      void (async () => {
-        try {
-          await ensureAudioGraph();
-          await waitForMediaReady(a);
-          if (token !== playStartTokenRef.current) return;
-
-          a.muted = false;
-          a.playbackRate = playbackRate;
-          safeSetCurrentTime(
-            a,
-            clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
-            seekTokenRef
-          );
-          await a.play();
-          if (token !== playStartTokenRef.current) return;
-          setPlaying(true);
-        } catch (err) {
-          if (!isPlayInterruptedError(err)) {
-            console.error("audio play failed:", err);
-          }
+      a.muted = false;
+      a.volume = 1;
+      a.playbackRate = playbackRate;
+      safeSetCurrentTime(
+        a,
+        clamp(v.currentTime - offsetSec, 0, a.duration || Infinity),
+        seekTokenRef
+      );
+      void a.play().catch((err) => {
+        if (token !== playStartTokenRef.current) return;
+        if (!isPlayInterruptedError(err)) {
+          console.error("audio play failed:", err);
         }
-      })();
+      });
     }
   }, [localSourceReady, offsetSec, playbackRate, playing, usesDetachedAudio]);
 
@@ -699,8 +674,6 @@ export default function Player() {
     return () => {
       if (urlForCleanup.current) URL.revokeObjectURL(urlForCleanup.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-
-      audioCtxRef.current?.close().catch(() => { });
     };
   }, []);
 
@@ -886,8 +859,8 @@ export default function Player() {
         <div className="grid gap-8">
           <div className="grid gap-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <video
-              muted
               ref={videoRef}
+              preload="auto"
               controls
               style={{
                 width: "100%",
@@ -900,7 +873,12 @@ export default function Player() {
               onPause={onVideoPause}
               onEnded={onVideoPause}
             />
-            <audio ref={audioRef} style={{ width: "100%" }} />
+            <video
+              ref={audioRef}
+              preload="auto"
+              playsInline
+              style={{ display: "none" }}
+            />
           </div>
 
           <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1377,28 +1355,6 @@ function parseFileNameFromContentDisposition(header: string | null) {
 
   const simpleMatch = header.match(/filename="([^"]+)"/i);
   return simpleMatch?.[1] ?? null;
-}
-
-function waitForMediaReady(el: HTMLMediaElement) {
-  if (el.readyState >= 2) {
-    return Promise.resolve();
-  }
-
-  return new Promise<void>((resolve) => {
-    const cleanup = () => {
-      el.removeEventListener("loadeddata", onReady);
-      el.removeEventListener("canplay", onReady);
-      el.removeEventListener("error", onReady);
-    };
-    const onReady = () => {
-      cleanup();
-      resolve();
-    };
-
-    el.addEventListener("loadeddata", onReady, { once: true });
-    el.addEventListener("canplay", onReady, { once: true });
-    el.addEventListener("error", onReady, { once: true });
-  });
 }
 
 /**

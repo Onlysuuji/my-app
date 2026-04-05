@@ -5,6 +5,7 @@ import {
   type YouTubeVideoSummary,
 } from "@/app/lib/youtube";
 import { getYouTubeApiKey, getYouTubeApiReferer } from "@/app/lib/server-env";
+import { enforceSearchRateLimit } from "@/app/lib/api-security";
 
 type YouTubeSearchResponse = {
   items?: Array<{
@@ -27,9 +28,20 @@ type YouTubeSearchResponse = {
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
+  const rateLimitResponse = enforceSearchRateLimit(request);
+  if (rateLimitResponse) {
+    return rateLimitResponse;
+  }
+
   const query = request.nextUrl.searchParams.get("q")?.trim() ?? "";
   if (!query) {
     return NextResponse.json({ error: "検索キーワードを入力してください。" }, { status: 400 });
+  }
+  if (query.length > 120) {
+    return NextResponse.json(
+      { error: "検索キーワードが長すぎます。" },
+      { status: 400 }
+    );
   }
 
   const apiKey = getYouTubeApiKey();
@@ -60,7 +72,7 @@ export async function GET(request: NextRequest) {
 
     if (!response.ok) {
       return NextResponse.json(
-        { error: payload.error?.message ?? "YouTube 検索に失敗しました。" },
+        { error: "YouTube 検索に失敗しました。" },
         { status: response.status }
       );
     }
