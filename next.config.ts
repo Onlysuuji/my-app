@@ -1,5 +1,8 @@
 const nextConfig = {
   allowedDevOrigins: ['192.168.0.23'],
+  experimental: {
+    proxyClientMaxBodySize: "300mb",
+  },
   images: {
     remotePatterns: [
       {

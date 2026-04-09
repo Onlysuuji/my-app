@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import Image from "next/image";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Script from "next/script";
 import {
   exportVideoWithOffset,
@@ -12,18 +12,36 @@ import {
   extractYouTubeVideoId,
   type YouTubeVideoSummary,
 } from "./lib/youtube";
+import type {
+  PlaybackBookmark,
+  SavedMediaItem,
+  SessionUser,
+} from "./lib/account-types";
 
 type SourceMode = "local" | "youtube-url" | "youtube-search";
 type SourceOrigin = "local" | "youtube";
+type AccountFormMode = "login" | "register";
 
 type SearchYouTubeResponse = {
   items?: YouTubeVideoSummary[];
   error?: string;
 };
 
-type PlaybackBookmark = {
-  id: string;
-  timeSec: number;
+type ResolveYouTubeResponse = {
+  item?: YouTubeVideoSummary;
+  warning?: string;
+  error?: string;
+};
+
+type AccountSessionResponse = {
+  user?: SessionUser | null;
+  error?: string;
+};
+
+type LibraryItemsResponse = {
+  items?: SavedMediaItem[];
+  item?: SavedMediaItem;
+  error?: string;
 };
 
 const YOUTUBE_IMPORT_BASELINE_OFFSET_SEC = -0.05;
@@ -54,8 +72,9 @@ export default function Player() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const playerShellRef = useRef<HTMLDivElement | null>(null);
 
-  const [sourceMode, setSourceMode] = useState<SourceMode>("local");
+  const [sourceMode, setSourceMode] = useState<SourceMode>("youtube-url");
   const [sourceOrigin, setSourceOrigin] = useState<SourceOrigin>("local");
   const [srcUrl, setSrcUrl] = useState<string | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
@@ -79,11 +98,35 @@ export default function Player() {
   const [youtubeUrlInput, setYoutubeUrlInput] = useState("");
   const [youtubeUrlError, setYoutubeUrlError] = useState<string | null>(null);
   const [youtubeSearchInput, setYoutubeSearchInput] = useState("");
+  const [youtubeSearchSelectedUrl, setYoutubeSearchSelectedUrl] = useState<string | null>(null);
   const [youtubeSearchError, setYoutubeSearchError] = useState<string | null>(null);
   const [youtubeSearchLoading, setYoutubeSearchLoading] = useState(false);
   const [youtubeSearchResults, setYoutubeSearchResults] = useState<YouTubeVideoSummary[]>([]);
   const [youtubeImporting, setYoutubeImporting] = useState(false);
   const [youtubeImportError, setYoutubeImportError] = useState<string | null>(null);
+  const [sessionUser, setSessionUser] = useState<SessionUser | null>(null);
+  const [accountLoading, setAccountLoading] = useState(true);
+  const [accountFormMode, setAccountFormMode] = useState<AccountFormMode>("login");
+  const [accountEmail, setAccountEmail] = useState("");
+  const [accountPassword, setAccountPassword] = useState("");
+  const [accountDisplayName, setAccountDisplayName] = useState("");
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [accountSubmitting, setAccountSubmitting] = useState(false);
+  const [savedItems, setSavedItems] = useState<SavedMediaItem[]>([]);
+  const [savedItemsLayout, setSavedItemsLayout] = useState<"scroll" | "grid">("scroll");
+  const [savedItemsSearchQuery, setSavedItemsSearchQuery] = useState("");
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [librarySaving, setLibrarySaving] = useState(false);
+  const [libraryTitle, setLibraryTitle] = useState("");
+  const [activeSavedItemId, setActiveSavedItemId] = useState<string | null>(null);
+  const [loadingSavedItemId, setLoadingSavedItemId] = useState<string | null>(null);
+  const [deletingSavedItemId, setDeletingSavedItemId] = useState<string | null>(null);
+  const [renamingSavedItemId, setRenamingSavedItemId] = useState<string | null>(null);
+  const [currentSourceUrl, setCurrentSourceUrl] = useState<string | null>(null);
+  const [currentYouTubeVideoId, setCurrentYouTubeVideoId] = useState<string | null>(null);
+  const [fullscreenMode, setFullscreenMode] = useState<"off" | "native" | "pseudo">("off");
+  const [fullscreenControlsOpen, setFullscreenControlsOpen] = useState(false);
   const exportStartedAtRef = useRef(0);
   const exportProgressRef = useRef(0);
 
@@ -91,10 +134,16 @@ export default function Player() {
   const rafRef = useRef<number | null>(null);
   const lastSyncCheckAtRef = useRef(0);
   const offsetDraggingRef = useRef(false);
+  const surfaceClickTimeoutRef = useRef<number | null>(null);
+  const isVideoSeekingRef = useRef(false);
+  const resumeAudioAfterSeekRef = useRef(false);
+  const autoSaveTimeoutRef = useRef<number | null>(null);
+  const lastSavedLibraryStateRef = useRef<string | null>(null);
 
   // safeSetCurrentTime の “古いリトライ上書き” 防止トークン
   const seekTokenRef = useRef(0);
   const playStartTokenRef = useRef(0);
+  const boundMediaSourceKeyRef = useRef<string | null>(null);
 
   const urlForCleanup = useRef<string | null>(null);
   const localSourceReady = !!srcUrl && !!sourceFile;
@@ -102,6 +151,19 @@ export default function Player() {
   const localControlsDisabled = !localSourceReady;
   const usesDetachedAudio = localSourceReady;
   const effectiveOffsetSec = offsetSec + getSourceBaselineOffsetSec(sourceOrigin);
+  const canSaveYouTubeMedia = sourceOrigin === "youtube" && !!currentSourceUrl;
+  const isPlayerFullscreen = fullscreenMode !== "off";
+  const isPseudoFullscreen = fullscreenMode === "pseudo";
+  const normalizedSavedItemsSearchQuery = savedItemsSearchQuery.trim().toLocaleLowerCase();
+  const filteredSavedItems =
+    normalizedSavedItemsSearchQuery.length === 0
+      ? savedItems
+      : savedItems.filter((item) => {
+          const searchTargets = [item.title, item.sourceUrl, item.originalFileName];
+          return searchTargets.some((value) =>
+            (value ?? "").toLocaleLowerCase().includes(normalizedSavedItemsSearchQuery)
+          );
+        });
 
   const syncLocalFileInput = (file: File | null) => {
     const input = fileInputRef.current;
@@ -123,10 +185,189 @@ export default function Player() {
 
   const stopLocalPlayback = () => {
     playStartTokenRef.current += 1;
+    isVideoSeekingRef.current = false;
+    resumeAudioAfterSeekRef.current = false;
+    if (autoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = null;
+    }
     videoRef.current?.pause();
     audioRef.current?.pause();
     setPlaying(false);
   };
+
+  const seekVideoBy = useCallback((deltaSec: number) => {
+    const video = videoRef.current;
+    if (!video || !localSourceReady) return;
+
+    video.currentTime = clamp(video.currentTime + deltaSec, 0, video.duration || Infinity);
+  }, [localSourceReady]);
+
+  const togglePlayback = async () => {
+    const video = videoRef.current;
+    if (!video || !localSourceReady) return;
+
+    if (video.paused) {
+      await video.play().catch(() => {});
+      return;
+    }
+
+    video.pause();
+  };
+
+  const onVideoSurfaceClick = () => {
+    if (!localSourceReady) return;
+
+    if (surfaceClickTimeoutRef.current !== null) {
+      window.clearTimeout(surfaceClickTimeoutRef.current);
+    }
+
+    surfaceClickTimeoutRef.current = window.setTimeout(() => {
+      if (isPlayerFullscreen) {
+        setFullscreenControlsOpen(true);
+      }
+
+      void togglePlayback();
+      surfaceClickTimeoutRef.current = null;
+    }, 220);
+  };
+
+  const onVideoSurfaceDoubleClick = (event: React.MouseEvent<HTMLVideoElement>) => {
+    if (!localSourceReady) return;
+
+    if (surfaceClickTimeoutRef.current !== null) {
+      window.clearTimeout(surfaceClickTimeoutRef.current);
+      surfaceClickTimeoutRef.current = null;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const midpoint = rect.left + rect.width / 2;
+    const delta = event.clientX < midpoint ? -5 : 5;
+
+    if (isPlayerFullscreen) {
+      setFullscreenControlsOpen(true);
+    }
+
+    seekVideoBy(delta);
+  };
+
+  const adjustPlaybackRate = useCallback((delta: number) => {
+    setPlaybackRate((value) => clamp(value + delta, 0.1, 2.0));
+  }, []);
+
+  const adjustOffset = useCallback((delta: number) => {
+    setOffsetSec((value) => clamp(value + delta, -0.3, 0.3));
+  }, []);
+
+  const exitPlayerFullscreen = useCallback(async () => {
+    if (typeof document === "undefined") return;
+
+    const playerShell = playerShellRef.current;
+    if (playerShell && document.fullscreenElement === playerShell) {
+      await document.exitFullscreen().catch(() => {});
+    }
+
+    setFullscreenMode("off");
+    setFullscreenControlsOpen(false);
+  }, []);
+
+  const enterPlayerFullscreen = useCallback(async () => {
+    const playerShell = playerShellRef.current;
+    if (!playerShell) return;
+
+    setFullscreenControlsOpen(true);
+
+    if (typeof playerShell.requestFullscreen === "function") {
+      try {
+        await playerShell.requestFullscreen();
+        setFullscreenMode("native");
+        return;
+      } catch {
+        // Fallback to pseudo fullscreen below.
+      }
+    }
+
+    setFullscreenMode("pseudo");
+  }, []);
+
+  const togglePlayerFullscreen = useCallback(async () => {
+    if (isPlayerFullscreen) {
+      await exitPlayerFullscreen();
+      return;
+    }
+
+    await enterPlayerFullscreen();
+  }, [enterPlayerFullscreen, exitPlayerFullscreen, isPlayerFullscreen]);
+
+  const buildCurrentLibrarySaveState = useCallback(() => {
+    const normalizedTitle = normalizeLibraryTitleForSave(
+      libraryTitle,
+      currentYouTubeVideoId,
+      currentSourceUrl
+    );
+
+    return {
+      title: normalizedTitle,
+      offsetSec,
+      trimStartSec,
+      trimEndSec,
+      bookmarks,
+    };
+  }, [bookmarks, currentSourceUrl, currentYouTubeVideoId, libraryTitle, offsetSec, trimEndSec, trimStartSec]);
+
+  const currentLibrarySaveSignature = useCallback(() => {
+    return createLibrarySaveSignature(buildCurrentLibrarySaveState());
+  }, [buildCurrentLibrarySaveState]);
+
+  const syncDetachedAudioToVideo = useCallback(() => {
+    if (!localSourceReady || !usesDetachedAudio) return null;
+
+    const video = videoRef.current;
+    const audio = audioRef.current;
+    if (!video || !audio) return null;
+
+    audio.playbackRate = playbackRate;
+    safeSetCurrentTime(
+      audio,
+      clamp(video.currentTime - effectiveOffsetSec, 0, audio.duration || Infinity),
+      seekTokenRef
+    );
+
+    return { video, audio };
+  }, [effectiveOffsetSec, localSourceReady, playbackRate, usesDetachedAudio]);
+
+  const resumeDetachedAudio = useCallback(() => {
+    if (!localSourceReady || !usesDetachedAudio || !srcUrl) return;
+
+    const syncedMedia = syncDetachedAudioToVideo();
+    if (!syncedMedia) return;
+
+    const { video, audio } = syncedMedia;
+    if (video.paused) return;
+
+    audio.muted = false;
+    audio.volume = 1;
+
+    const startToken = ++playStartTokenRef.current;
+    void audio
+      .play()
+      .then(() => {
+        if (startToken !== playStartTokenRef.current) return;
+
+        requestAnimationFrame(() => {
+          if (startToken !== playStartTokenRef.current) return;
+          syncDetachedAudioToVideo();
+        });
+
+        setPlaying(true);
+      })
+      .catch((err) => {
+        if (startToken !== playStartTokenRef.current) return;
+        if (!isPlayInterruptedError(err)) {
+          console.error("audio play failed:", err);
+        }
+      });
+  }, [localSourceReady, srcUrl, syncDetachedAudioToVideo, usesDetachedAudio]);
 
   const onSourceModeChange = (nextMode: SourceMode) => {
     if (nextMode === sourceMode) return;
@@ -144,6 +385,7 @@ export default function Player() {
       setYoutubeSearchInput("");
       setYoutubeSearchError(null);
       setYoutubeSearchResults([]);
+      setYoutubeSearchSelectedUrl(null);
     }
 
     setYoutubeSource(null);
@@ -157,6 +399,11 @@ export default function Player() {
     options?: {
       keepCurrentTab?: boolean;
       sourceOrigin?: SourceOrigin;
+      libraryTitle?: string;
+      savedItemId?: string | null;
+      sourceUrl?: string | null;
+      youtubeVideoId?: string | null;
+      resetBookmarks?: boolean;
     }
   ) => {
     if (!file) return;
@@ -175,10 +422,28 @@ export default function Player() {
     setSrcUrl(url);
     setSourceFile(file);
     setSourceOrigin(options?.sourceOrigin ?? "local");
+    setLibraryTitle(options?.libraryTitle ?? getDefaultLibraryTitle(file.name));
+    setActiveSavedItemId(options?.savedItemId ?? null);
+    setCurrentSourceUrl(options?.sourceUrl ?? null);
+    setCurrentYouTubeVideoId(options?.youtubeVideoId ?? null);
+    if (!options?.savedItemId) {
+      setOffsetSec(0);
+      setPlaybackRate(1);
+    }
+    if (!options?.keepCurrentTab) {
+      setYoutubeSearchSelectedUrl(null);
+    }
     setYoutubeSource(null);
     setYoutubeWarning(null);
     setYoutubeImportError(null);
-    setBookmarks([]);
+    if (options?.resetBookmarks ?? true) {
+      setBookmarks([]);
+    }
+    setTrimStartSec(null);
+    setTrimEndSec(null);
+    if (!options?.savedItemId) {
+      lastSavedLibraryStateRef.current = null;
+    }
 
     // 任意：表示リセット
     setExportError(null);
@@ -208,6 +473,8 @@ export default function Player() {
 
   const onVideoPause = () => {
     playStartTokenRef.current += 1;
+    isVideoSeekingRef.current = false;
+    resumeAudioAfterSeekRef.current = false;
     const a = audioRef.current;
     a?.pause();
     setPlaying(false);
@@ -279,14 +546,350 @@ export default function Player() {
     }
   };
 
+  const refreshSession = async () => {
+    setAccountLoading(true);
+
+    try {
+      const response = await fetch("/api/account/session", {
+        cache: "no-store",
+      });
+      const data = (await response.json()) as AccountSessionResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "セッション確認に失敗しました。");
+      }
+
+      setSessionUser(data.user ?? null);
+      setAccountError(null);
+    } catch (err) {
+      setAccountError(err instanceof Error ? err.message : "セッション確認に失敗しました。");
+      setSessionUser(null);
+    } finally {
+      setAccountLoading(false);
+    }
+  };
+
+  const refreshSavedItems = useCallback(async () => {
+    if (!sessionUser) {
+      setSavedItems([]);
+      setLibraryLoading(false);
+      return;
+    }
+
+    setLibraryLoading(true);
+
+    try {
+      const response = await fetch("/api/library/items", {
+        cache: "no-store",
+      });
+      const data = (await response.json()) as LibraryItemsResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "保存済み動画の取得に失敗しました。");
+      }
+
+      setSavedItems(sortSavedItems(data.items ?? []));
+      setLibraryError(null);
+    } catch (err) {
+      setLibraryError(
+        err instanceof Error ? err.message : "保存済み動画の取得に失敗しました。"
+      );
+    } finally {
+      setLibraryLoading(false);
+    }
+  }, [sessionUser]);
+
+  const submitAccountForm = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    setAccountSubmitting(true);
+    setAccountError(null);
+
+    try {
+      const endpoint =
+        accountFormMode === "register" ? "/api/account/register" : "/api/account/login";
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: accountEmail,
+          password: accountPassword,
+          displayName: accountDisplayName,
+        }),
+      });
+      const data = (await response.json()) as AccountSessionResponse;
+
+      if (!response.ok || !data.user) {
+        throw new Error(data.error ?? "認証に失敗しました。");
+      }
+
+      setSessionUser(data.user);
+      setAccountPassword("");
+      setAccountError(null);
+    } catch (err) {
+      setAccountError(err instanceof Error ? err.message : "認証に失敗しました。");
+    } finally {
+      setAccountSubmitting(false);
+    }
+  };
+
+  const logoutAccount = async () => {
+    setAccountSubmitting(true);
+    setAccountError(null);
+
+    try {
+      const response = await fetch("/api/account/logout", {
+        method: "POST",
+      });
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+
+      if (!response.ok) {
+        throw new Error(data?.error ?? "ログアウトに失敗しました。");
+      }
+
+      setSessionUser(null);
+      setSavedItems([]);
+      setActiveSavedItemId(null);
+      setLibraryError(null);
+      lastSavedLibraryStateRef.current = null;
+    } catch (err) {
+      setAccountError(err instanceof Error ? err.message : "ログアウトに失敗しました。");
+    } finally {
+      setAccountSubmitting(false);
+    }
+  };
+
+  const saveCurrentMediaToAccount = useCallback(async () => {
+    if (!sessionUser || !canSaveYouTubeMedia) return;
+
+    const currentSaveState = buildCurrentLibrarySaveState();
+    setLibrarySaving(true);
+    setLibraryError(null);
+
+    try {
+      let response: Response;
+      let savedItem: SavedMediaItem | null = null;
+
+      if (activeSavedItemId) {
+        response = await fetch(`/api/library/items/${activeSavedItemId}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ...currentSaveState,
+            bookmarks: JSON.stringify(currentSaveState.bookmarks),
+          }),
+        });
+
+        const data = (await response.json()) as LibraryItemsResponse;
+        if (!response.ok || !data.item) {
+          throw new Error(data.error ?? "保存に失敗しました。");
+        }
+
+        savedItem = data.item;
+      } else {
+        response = await fetch("/api/library/items", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: currentSaveState.title,
+            sourceKind: "youtube",
+            sourceOrigin: "youtube",
+            sourceUrl: currentSourceUrl,
+            youtubeVideoId: currentYouTubeVideoId,
+            offsetSec: currentSaveState.offsetSec,
+            trimStartSec: currentSaveState.trimStartSec,
+            trimEndSec: currentSaveState.trimEndSec,
+            bookmarks: JSON.stringify(currentSaveState.bookmarks),
+          }),
+        });
+
+        const createData = (await response.json()) as LibraryItemsResponse;
+        if (!response.ok || !createData.item) {
+          throw new Error(createData.error ?? "保存に失敗しました。");
+        }
+        savedItem = createData.item;
+      }
+
+      if (!savedItem) {
+        throw new Error("保存に失敗しました。");
+      }
+
+      lastSavedLibraryStateRef.current = createLibrarySaveSignature({
+        title: savedItem.title,
+        offsetSec: savedItem.offsetSec,
+        trimStartSec: savedItem.trimStartSec,
+        trimEndSec: savedItem.trimEndSec,
+        bookmarks: savedItem.bookmarks,
+      });
+      setActiveSavedItemId(savedItem.id);
+      setLibraryTitle(savedItem.title);
+      setSavedItems((current) => upsertSavedItem(current, savedItem));
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : "保存に失敗しました。");
+    } finally {
+      setLibrarySaving(false);
+    }
+  }, [
+    activeSavedItemId,
+    buildCurrentLibrarySaveState,
+    canSaveYouTubeMedia,
+    currentSourceUrl,
+    currentYouTubeVideoId,
+    sessionUser,
+  ]);
+
+  const loadSavedItem = async (item: SavedMediaItem) => {
+    setLoadingSavedItemId(item.id);
+    setLibraryError(null);
+
+    try {
+      const response = await fetch(`/api/library/items/${item.id}/file`, {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? "保存済み動画の読み込みに失敗しました。");
+      }
+
+      const blob = await response.blob();
+      const fileName =
+        parseFileNameFromContentDisposition(response.headers.get("Content-Disposition")) ??
+        item.originalFileName;
+      const mimeType =
+        response.headers.get("Content-Type")?.split(";")[0]?.trim() ||
+        item.mimeType ||
+        blob.type ||
+        "video/mp4";
+      const file = new File([blob], fileName, {
+        type: mimeType,
+      });
+
+      lastSavedLibraryStateRef.current = createLibrarySaveSignature({
+        title: item.title,
+        offsetSec: item.offsetSec,
+        trimStartSec: item.trimStartSec,
+        trimEndSec: item.trimEndSec,
+        bookmarks: item.bookmarks,
+      });
+      onPickFile(file, {
+        sourceOrigin: item.sourceOrigin,
+        libraryTitle: item.title,
+        savedItemId: item.id,
+        sourceUrl: item.sourceUrl,
+        youtubeVideoId: item.youtubeVideoId,
+        resetBookmarks: false,
+      });
+      setOffsetSec(item.offsetSec);
+      setPlaybackRate(1);
+      setTrimStartSec(item.trimStartSec);
+      setTrimEndSec(item.trimEndSec);
+      setBookmarks(item.bookmarks);
+    } catch (err) {
+      setLibraryError(
+        err instanceof Error ? err.message : "保存済み動画の読み込みに失敗しました。"
+      );
+    } finally {
+      setLoadingSavedItemId(null);
+    }
+  };
+
+  const deleteSavedItemById = async (itemId: string) => {
+    if (!window.confirm("この保存済み動画を削除しますか？")) {
+      return;
+    }
+
+    setDeletingSavedItemId(itemId);
+    setLibraryError(null);
+
+    try {
+      const response = await fetch(`/api/library/items/${itemId}`, {
+        method: "DELETE",
+      });
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+
+      if (!response.ok) {
+        throw new Error(data?.error ?? "保存済み動画の削除に失敗しました。");
+      }
+
+      setSavedItems((current) => current.filter((item) => item.id !== itemId));
+      if (activeSavedItemId === itemId) {
+        setActiveSavedItemId(null);
+        lastSavedLibraryStateRef.current = null;
+      }
+    } catch (err) {
+      setLibraryError(
+        err instanceof Error ? err.message : "保存済み動画の削除に失敗しました。"
+      );
+    } finally {
+      setDeletingSavedItemId(null);
+    }
+  };
+
+  const renameSavedItem = async (item: SavedMediaItem) => {
+    const nextTitle = window.prompt("保存済み動画の名前を変更", item.title);
+    if (nextTitle === null) {
+      return;
+    }
+
+    const normalizedTitle = nextTitle.trim().slice(0, 160);
+    if (!normalizedTitle || normalizedTitle === item.title) {
+      return;
+    }
+
+    setRenamingSavedItemId(item.id);
+    setLibraryError(null);
+
+    try {
+      const response = await fetch(`/api/library/items/${item.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: normalizedTitle,
+        }),
+      });
+      const data = (await response.json()) as LibraryItemsResponse;
+
+      if (!response.ok || !data.item) {
+        throw new Error(data.error ?? "名前変更に失敗しました。");
+      }
+
+      const updatedItem = data.item;
+      if (activeSavedItemId === updatedItem.id) {
+        setLibraryTitle(updatedItem.title);
+        lastSavedLibraryStateRef.current = createLibrarySaveSignature({
+          title: updatedItem.title,
+          offsetSec,
+          trimStartSec,
+          trimEndSec,
+          bookmarks,
+        });
+      }
+      setSavedItems((current) => upsertSavedItem(current, updatedItem));
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : "名前変更に失敗しました。");
+    } finally {
+      setRenamingSavedItemId(null);
+    }
+  };
+
   // 動画の controls から再生された場合の同期開始
-  const startFromVideo = async () => {
-    const startToken = ++playStartTokenRef.current;
+  const startFromVideo = () => {
     const v = videoRef.current;
     const a = audioRef.current;
     if (!localSourceReady || !v || !a || !srcUrl) return;
     if (!a.paused) return;
 
+    isVideoSeekingRef.current = false;
+    resumeAudioAfterSeekRef.current = false;
     v.muted = false;
     v.volume = usesDetachedAudio ? 0 : 1;
     a.muted = false;
@@ -295,40 +898,7 @@ export default function Player() {
     v.playbackRate = playbackRate;
     a.playbackRate = playbackRate;
 
-    // まず合わせる
-    safeSetCurrentTime(
-      a,
-      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
-      seekTokenRef
-    );
-
-    // onPlay で呼ばれるため video.play() は不要。audio.play() だけ同期して開始。
-    const playPromise = a.play();
-    void playPromise
-      .then(() => {
-        if (startToken !== playStartTokenRef.current) return;
-
-        // 次フレームでもう一回合わせる（初期ズレ潰し）
-        requestAnimationFrame(() => {
-          if (startToken !== playStartTokenRef.current) return;
-          const vNow = videoRef.current;
-          const aNow = audioRef.current;
-          if (!vNow || !aNow) return;
-          safeSetCurrentTime(
-            aNow,
-            clamp(vNow.currentTime - effectiveOffsetSec, 0, aNow.duration || Infinity),
-            seekTokenRef
-          );
-        });
-
-        setPlaying(true);
-      })
-      .catch((err) => {
-      // 再生中断（pause 競合）による AbortError は想定内として握りつぶす
-        if (!isPlayInterruptedError(err)) {
-          console.error("audio play failed:", err);
-        }
-      });
+    resumeDetachedAudio();
   };
 
   const resolveYouTubeUrl = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -347,17 +917,26 @@ export default function Player() {
 
     stopLocalPlayback();
     setYoutubeUrlError(null);
+    setYoutubeSearchSelectedUrl(null);
     setYoutubeWarning(null);
     setYoutubeSource(null);
     setYoutubeImportError(null);
 
     try {
-      await importYouTubeIntoLocal({
+      const summary = await fetchYouTubeSummary({
         url: trimmed,
         videoId: extractYouTubeVideoId(trimmed) ?? undefined,
       });
+
+      await importYouTubeIntoLocal({
+        url: trimmed,
+        videoId: extractYouTubeVideoId(trimmed) ?? undefined,
+        title: summary?.title,
+      });
     } catch (err) {
-      setYoutubeUrlError(err instanceof Error ? err.message : "YouTube 動画の取得に失敗しました。");
+      setYoutubeUrlError(
+        err instanceof Error ? err.message : "YouTube 動画の取得に失敗しました。"
+      );
     }
   };
 
@@ -401,6 +980,7 @@ export default function Player() {
   const selectYouTubeSource = async (item: YouTubeVideoSummary) => {
     stopLocalPlayback();
     setYoutubeSource(item);
+    setYoutubeSearchSelectedUrl(item.url);
     setYoutubeWarning(null);
     setYoutubeUrlInput(item.url);
     setYoutubeUrlError(null);
@@ -453,7 +1033,13 @@ export default function Player() {
         type: blob.type || "video/mp4",
       });
 
-      onPickFile(importedFile, { keepCurrentTab: true, sourceOrigin: "youtube" });
+      onPickFile(importedFile, {
+        keepCurrentTab: true,
+        sourceOrigin: "youtube",
+        libraryTitle: options.title ?? getDefaultLibraryTitle(importedFile.name),
+        sourceUrl: options.url,
+        youtubeVideoId: options.videoId ?? null,
+      });
     } catch (err) {
       const error =
         err instanceof Error ? err : new Error("YouTube 動画の取り込みに失敗しました。");
@@ -478,21 +1064,44 @@ export default function Player() {
     }
   };
 
+  const fetchYouTubeSummary = async (options: { url: string; videoId?: string }) => {
+    const searchParams = new URLSearchParams();
+    searchParams.set("url", options.url);
+    if (options.videoId) {
+      searchParams.set("videoId", options.videoId);
+    }
+
+    const response = await fetch(`/api/youtube/resolve?${searchParams.toString()}`, {
+      cache: "no-store",
+    });
+    const data = (await response.json()) as ResolveYouTubeResponse;
+
+    if (!response.ok) {
+      throw new Error(data.error ?? "YouTube 動画情報の取得に失敗しました。");
+    }
+
+    if (data.item) {
+      setYoutubeSource(data.item);
+    }
+    setYoutubeWarning(data.warning ?? null);
+
+    return data.item ?? null;
+  };
+
   // seekSync: offset変更が確定したら1回だけシーク（ドラッグ中はしない）
   useEffect(() => {
     if (!localSourceReady || !playing || !usesDetachedAudio) return;
     if (offsetDraggingRef.current) return;
+    if (isVideoSeekingRef.current) return;
 
-    const v = videoRef.current;
-    const a = audioRef.current;
-    if (!v || !a) return;
-
-    safeSetCurrentTime(
-      a,
-      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
-      seekTokenRef
-    );
-  }, [effectiveOffsetSec, localSourceReady, playing, usesDetachedAudio]);
+    syncDetachedAudioToVideo();
+  }, [
+    effectiveOffsetSec,
+    localSourceReady,
+    playing,
+    syncDetachedAudioToVideo,
+    usesDetachedAudio,
+  ]);
 
   // 再生速度反映
   useEffect(() => {
@@ -522,7 +1131,7 @@ export default function Player() {
       const now = performance.now();
 
       // ドラッグ中は “補正しない”。音は基準速度に固定。
-      if (offsetDraggingRef.current) {
+      if (offsetDraggingRef.current || isVideoSeekingRef.current) {
         a.playbackRate = playbackRate;
 
         rafRef.current = requestAnimationFrame(tick);
@@ -555,8 +1164,7 @@ export default function Player() {
     };
   }, [effectiveOffsetSec, localSourceReady, playbackRate, playing, usesDetachedAudio]);
 
-  // シーク時の追従（ドラッグ中は無視）
-  const onVideoSeeked = () => {
+  const onVideoSeeking = () => {
     if (!localSourceReady || !usesDetachedAudio) return;
     if (offsetDraggingRef.current) return;
 
@@ -564,30 +1172,157 @@ export default function Player() {
     const a = audioRef.current;
     if (!v || !a) return;
 
-    safeSetCurrentTime(
-      a,
-      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
-      seekTokenRef
-    );
+    isVideoSeekingRef.current = true;
+    resumeAudioAfterSeekRef.current = !v.paused;
+    playStartTokenRef.current += 1;
+    a.pause();
+    syncDetachedAudioToVideo();
+  };
+
+  // シーク時の追従（ドラッグ中は無視）
+  const onVideoSeeked = () => {
+    if (!localSourceReady || !usesDetachedAudio) return;
+    if (offsetDraggingRef.current) return;
+
+    isVideoSeekingRef.current = false;
+
+    const syncedMedia = syncDetachedAudioToVideo();
+    if (!syncedMedia) return;
+
+    const shouldResume = resumeAudioAfterSeekRef.current && !syncedMedia.video.paused;
+    resumeAudioAfterSeekRef.current = false;
+
+    if (shouldResume) {
+      resumeDetachedAudio();
+    }
   };
 
   const onOffsetCommit = () => {
     offsetDraggingRef.current = false;
     if (!localSourceReady || !playing || !usesDetachedAudio) return;
+    if (isVideoSeekingRef.current) return;
 
-    const v = videoRef.current;
-    const a = audioRef.current;
-    if (!v || !a) return;
-
-    safeSetCurrentTime(
-      a,
-      clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
-      seekTokenRef
-    );
+    syncDetachedAudioToVideo();
   };
 
   useEffect(() => {
+    void refreshSession();
+  }, []);
+
+  useEffect(() => {
+    if (!sessionUser) {
+      setSavedItems([]);
+      setLibraryLoading(false);
+      setActiveSavedItemId(null);
+      lastSavedLibraryStateRef.current = null;
+      return;
+    }
+
+    void refreshSavedItems();
+  }, [refreshSavedItems, sessionUser]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    if (autoSaveTimeoutRef.current !== null) {
+      window.clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = null;
+    }
+
+    if (
+      !sessionUser ||
+      !canSaveYouTubeMedia ||
+      !localSourceReady ||
+      !!loadingSavedItemId ||
+      !!deletingSavedItemId ||
+      !!renamingSavedItemId ||
+      librarySaving
+    ) {
+      return;
+    }
+
+    const nextSignature = currentLibrarySaveSignature();
+    if (nextSignature === lastSavedLibraryStateRef.current) {
+      return;
+    }
+
+    autoSaveTimeoutRef.current = window.setTimeout(() => {
+      autoSaveTimeoutRef.current = null;
+      void saveCurrentMediaToAccount();
+    }, 700);
+
+    return () => {
+      if (autoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(autoSaveTimeoutRef.current);
+        autoSaveTimeoutRef.current = null;
+      }
+    };
+  }, [
+    activeSavedItemId,
+    canSaveYouTubeMedia,
+    currentLibrarySaveSignature,
+    deletingSavedItemId,
+    librarySaving,
+    loadingSavedItemId,
+    localSourceReady,
+    renamingSavedItemId,
+    saveCurrentMediaToAccount,
+    sessionUser,
+  ]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    const onFullscreenChange = () => {
+      const playerShell = playerShellRef.current;
+      if (playerShell && document.fullscreenElement === playerShell) {
+        setFullscreenMode("native");
+        setFullscreenControlsOpen(true);
+        return;
+      }
+
+      setFullscreenMode((current) => (current === "native" ? "off" : current));
+      setFullscreenControlsOpen((current) =>
+        document.fullscreenElement ? current : false
+      );
+    };
+
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined" || !isPseudoFullscreen) {
+      return;
+    }
+
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+    };
+  }, [isPseudoFullscreen]);
+
+  useEffect(() => {
+    if (!localSourceReady && isPlayerFullscreen) {
+      void exitPlayerFullscreen();
+    }
+  }, [exitPlayerFullscreen, isPlayerFullscreen, localSourceReady]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && isPseudoFullscreen) {
+        event.preventDefault();
+        void exitPlayerFullscreen();
+        return;
+      }
+
       if (!localSourceReady) return;
       if (event.ctrlKey || event.altKey || event.metaKey) return;
       if (isEditableElement(event.target)) return;
@@ -595,38 +1330,53 @@ export default function Player() {
       const lowerKey = event.key.toLowerCase();
       if (lowerKey === "q") {
         event.preventDefault();
-        setOffsetSec((value) => clamp(value - 0.005, -0.3, 0.3));
+        adjustOffset(-0.005);
+        return;
+      }
+      if (lowerKey === "w") {
+        event.preventDefault();
+        setOffsetSec(0);
         return;
       }
       if (lowerKey === "e") {
         event.preventDefault();
-        setOffsetSec((value) => clamp(value + 0.005, -0.3, 0.3));
+        adjustOffset(0.005);
         return;
       }
       if (lowerKey === "a") {
         event.preventDefault();
-        setPlaybackRate((value) => clamp(value - 0.05, 0.1, 2.0));
+        adjustPlaybackRate(-0.05);
+        return;
+      }
+      if (lowerKey === "s") {
+        event.preventDefault();
+        setPlaybackRate(1.0);
         return;
       }
       if (lowerKey === "d") {
         event.preventDefault();
-        setPlaybackRate((value) => clamp(value + 0.05, 0.1, 2.0));
+        adjustPlaybackRate(0.05);
         return;
       }
       if (lowerKey === "f") {
+        event.preventDefault();
+        void togglePlayerFullscreen();
+        return;
+      }
+      if (event.code === "Space") {
         const video = videoRef.current;
         if (!video) return;
 
         event.preventDefault();
-        if (document.fullscreenElement === video) {
-          void document.exitFullscreen().catch(() => {});
+        if (video.paused) {
+          void video.play().catch(() => {});
           return;
         }
 
-        void video.requestFullscreen().catch(() => {});
+        video.pause();
         return;
       }
-      if (event.code === "Space") {
+      if (lowerKey === "k") {
         const video = videoRef.current;
         if (!video) return;
 
@@ -650,13 +1400,14 @@ export default function Player() {
         );
         return;
       }
-      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        const video = videoRef.current;
-        if (!video) return;
-
+      if (lowerKey === "j" || lowerKey === "l") {
         event.preventDefault();
-        const delta = event.key === "ArrowLeft" ? -5 : 5;
-        video.currentTime = clamp(video.currentTime + delta, 0, video.duration || Infinity);
+        seekVideoBy(lowerKey === "j" ? -10 : 10);
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        seekVideoBy(event.key === "ArrowLeft" ? -5 : 5);
         return;
       }
 
@@ -675,7 +1426,16 @@ export default function Player() {
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [bookmarks, localSourceReady]);
+  }, [
+    adjustOffset,
+    adjustPlaybackRate,
+    bookmarks,
+    exitPlayerFullscreen,
+    isPseudoFullscreen,
+    localSourceReady,
+    seekVideoBy,
+    togglePlayerFullscreen,
+  ]);
 
   // src URL 更新
   useEffect(() => {
@@ -683,7 +1443,17 @@ export default function Player() {
     const a = audioRef.current;
     if (!v || !a) return;
 
+    const mediaSourceKey =
+      localSourceReady && srcUrl
+        ? `${srcUrl}::${usesDetachedAudio ? "detached" : "inline"}`
+        : null;
+
+    if (mediaSourceKey && boundMediaSourceKeyRef.current === mediaSourceKey) {
+      return;
+    }
+
     if (localSourceReady && srcUrl) {
+      boundMediaSourceKeyRef.current = mediaSourceKey;
       v.src = srcUrl;
       v.muted = false;
       v.volume = usesDetachedAudio ? 0 : 1;
@@ -705,6 +1475,7 @@ export default function Player() {
       return;
     }
 
+    boundMediaSourceKeyRef.current = null;
     v.removeAttribute("src");
     a.removeAttribute("src");
     v.load();
@@ -747,31 +1518,27 @@ export default function Player() {
 
     v.muted = false;
     v.volume = usesDetachedAudio ? 0 : 1;
-    if (playing && a.paused) {
-      const token = ++playStartTokenRef.current;
-
-      a.muted = false;
-      a.volume = 1;
-      a.playbackRate = playbackRate;
-      safeSetCurrentTime(
-        a,
-        clamp(v.currentTime - effectiveOffsetSec, 0, a.duration || Infinity),
-        seekTokenRef
-      );
-      void a.play().catch((err) => {
-        if (token !== playStartTokenRef.current) return;
-        if (!isPlayInterruptedError(err)) {
-          console.error("audio play failed:", err);
-        }
-      });
+    if (playing && a.paused && !isVideoSeekingRef.current) {
+      resumeDetachedAudio();
     }
-  }, [effectiveOffsetSec, localSourceReady, playbackRate, playing, usesDetachedAudio]);
+  }, [
+    localSourceReady,
+    playing,
+    resumeDetachedAudio,
+    usesDetachedAudio,
+  ]);
 
   // アンマウント時の後始末
   useEffect(() => {
     return () => {
       if (urlForCleanup.current) URL.revokeObjectURL(urlForCleanup.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (surfaceClickTimeoutRef.current !== null) {
+        window.clearTimeout(surfaceClickTimeoutRef.current);
+      }
+      if (autoSaveTimeoutRef.current !== null) {
+        window.clearTimeout(autoSaveTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -786,25 +1553,139 @@ export default function Player() {
         }
       />
 
-      <div>
-        <div className="mb-3 flex flex-wrap gap-2">
-          <ModeButton
-            active={sourceMode === "local"}
-            label="ローカルファイル"
-            onClick={() => onSourceModeChange("local")}
-          />
-          <ModeButton
-            active={sourceMode === "youtube-url"}
-            label="YouTube URL"
-            onClick={() => onSourceModeChange("youtube-url")}
-          />
-          <ModeButton
-            active={sourceMode === "youtube-search"}
-            label="YouTube 検索"
-            onClick={() => onSourceModeChange("youtube-search")}
-          />
+      <section className="grid gap-4">
+        <div className="flex flex-col gap-3 xl:flex-row-reverse xl:items-start xl:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="rounded-full border border-slate-300 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700">
+              {accountLoading
+                ? "セッション確認中..."
+                : sessionUser
+                  ? sessionUser.displayName || "ログイン中"
+                  : "ゲスト"}
+            </div>
+            {!accountLoading && sessionUser && (
+              <button
+                type="button"
+                onClick={() => void logoutAccount()}
+                disabled={accountSubmitting}
+                className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 disabled:opacity-60"
+              >
+                ログアウト
+              </button>
+            )}
+            {!accountLoading && !sessionUser && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setAccountFormMode("login")}
+                  className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
+                    accountFormMode === "login"
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                  }`}
+                >
+                  ログイン
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAccountFormMode("register")}
+                  className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
+                    accountFormMode === "register"
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                  }`}
+                >
+                  新規登録
+                </button>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <ModeButton
+              active={sourceMode === "youtube-url"}
+              label="YouTube URL"
+              onClick={() => onSourceModeChange("youtube-url")}
+            />
+            <ModeButton
+              active={sourceMode === "youtube-search"}
+              label="YouTube 検索"
+              onClick={() => onSourceModeChange("youtube-search")}
+            />
+            <ModeButton
+              active={sourceMode === "local"}
+              label="ローカルファイル"
+              onClick={() => onSourceModeChange("local")}
+            />
+          </div>
         </div>
-      </div>
+
+        {!accountLoading && !sessionUser && (
+          <form className="grid gap-3" onSubmit={submitAccountForm}>
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-2">
+                <span className="text-sm font-medium text-slate-700">メールアドレス</span>
+                <input
+                  type="email"
+                  value={accountEmail}
+                  onChange={(event) => setAccountEmail(event.target.value)}
+                  className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900"
+                  placeholder="name@example.com"
+                  autoComplete="email"
+                />
+              </label>
+              <label className="grid gap-2">
+                <span className="text-sm font-medium text-slate-700">パスワード</span>
+                <input
+                  type="password"
+                  value={accountPassword}
+                  onChange={(event) => setAccountPassword(event.target.value)}
+                  className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900"
+                  placeholder="6文字以上"
+                  autoComplete={
+                    accountFormMode === "register" ? "new-password" : "current-password"
+                  }
+                />
+              </label>
+            </div>
+            {accountFormMode === "register" && (
+              <label className="grid gap-2 md:max-w-sm">
+                <span className="text-sm font-medium text-slate-700">表示名</span>
+                <input
+                  type="text"
+                  value={accountDisplayName}
+                  onChange={(event) => setAccountDisplayName(event.target.value)}
+                  className="rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900"
+                  placeholder="任意"
+                  autoComplete="nickname"
+                />
+              </label>
+            )}
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                disabled={accountSubmitting}
+                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {accountSubmitting
+                  ? "送信中..."
+                  : accountFormMode === "register"
+                    ? "アカウントを作成"
+                    : "ログイン"}
+              </button>
+              <span className="text-xs text-slate-500">
+                ログインすると、YouTube 動画の URL と調整値を保存できます。
+              </span>
+            </div>
+          </form>
+        )}
+
+        {accountError && (
+          <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {accountError}
+          </p>
+        )}
+      </section>
 
       {sourceMode === "local" && (
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -887,6 +1768,20 @@ export default function Player() {
               <span className="text-xs text-slate-500">
                 検索結果をクリックすると `yt-dlp` で取り込みます。
               </span>
+              {youtubeSearchSelectedUrl && (
+                <div className="min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  <div className="font-medium text-slate-700">現在の動画 URL</div>
+                  <a
+                    href={youtubeSearchSelectedUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={youtubeSearchSelectedUrl}
+                    className="block truncate text-slate-900 hover:underline"
+                  >
+                    {youtubeSearchSelectedUrl}
+                  </a>
+                </div>
+              )}
             </div>
             {youtubeSearchError && (
               <p className="text-sm text-red-700">{youtubeSearchError}</p>
@@ -959,24 +1854,386 @@ export default function Player() {
         </section>
       )}
 
+      {sessionUser && (
+        <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-slate-900">保存済み動画</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                value={savedItemsSearchQuery}
+                onChange={(event) => setSavedItemsSearchQuery(event.target.value)}
+                placeholder="タイトルや URL で検索"
+                aria-label="保存済み動画を検索"
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900 md:w-80"
+              />
+              <div className="flex overflow-hidden rounded-md border border-slate-300">
+                <button
+                  type="button"
+                  onClick={() => setSavedItemsLayout("scroll")}
+                  className={`px-3 py-2 text-sm font-semibold transition ${
+                    savedItemsLayout === "scroll"
+                      ? "bg-slate-900 text-white"
+                      : "bg-white text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  横スクロール
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSavedItemsLayout("grid")}
+                  className={`border-l border-slate-300 px-3 py-2 text-sm font-semibold transition ${
+                    savedItemsLayout === "grid"
+                      ? "bg-slate-900 text-white"
+                      : "bg-white text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  敷き詰め
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshSavedItems()}
+                disabled={libraryLoading}
+                className="rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
+              >
+                {libraryLoading ? "更新中..." : "再読み込み"}
+              </button>
+            </div>
+          </div>
+
+          {libraryError && (
+            <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {libraryError}
+            </p>
+          )}
+
+          {filteredSavedItems.length > 0 ? (
+            <div
+              className={
+                savedItemsLayout === "scroll" ? "overflow-x-auto pb-2" : ""
+              }
+            >
+              <div
+                className={
+                  savedItemsLayout === "scroll"
+                    ? "flex min-w-max gap-3"
+                    : "grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
+                }
+              >
+              {filteredSavedItems.map((item) => {
+                const isActive = item.id === activeSavedItemId;
+                const isLoading = item.id === loadingSavedItemId;
+                const isDeleting = item.id === deletingSavedItemId;
+                const isRenaming = item.id === renamingSavedItemId;
+
+                return (
+                  <div
+                    key={item.id}
+                    className={`grid gap-3 rounded-lg border p-4 ${
+                      savedItemsLayout === "scroll" ? "w-80 shrink-0" : "w-full"
+                    } ${
+                      isActive
+                        ? "border-emerald-500 bg-emerald-50"
+                        : "border-slate-200 bg-white"
+                    }`}
+                  >
+                    <div className="grid gap-1">
+                      <div className="font-semibold text-slate-900">{item.title}</div>
+                      <div className="truncate text-xs text-slate-500">
+                        {item.sourceUrl || item.originalFileName}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {formatSavedItemStorage(item)} ・ 更新 {formatRelativeDate(item.updatedAt)}
+                      </div>
+                    </div>
+                    <div className="grid gap-1 text-xs text-slate-600">
+                      <div>オフセット {item.offsetSec.toFixed(3)} 秒</div>
+                      <div>ブックマーク {item.bookmarks.length} 件</div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void loadSavedItem(item)}
+                        disabled={!!loadingSavedItemId || !!deletingSavedItemId || !!renamingSavedItemId}
+                        className="rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                      >
+                        {isLoading ? "読み込み中..." : "読み込む"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void renameSavedItem(item)}
+                        disabled={!!loadingSavedItemId || !!deletingSavedItemId || !!renamingSavedItemId}
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
+                      >
+                        {isRenaming ? "変更中..." : "名前変更"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void deleteSavedItemById(item.id)}
+                        disabled={!!loadingSavedItemId || !!deletingSavedItemId || !!renamingSavedItemId}
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
+                      >
+                        {isDeleting ? "削除中..." : "削除"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
+              {libraryLoading
+                ? "読み込み中..."
+                : savedItems.length > 0
+                  ? "検索条件に一致する保存済み動画はありません。"
+                  : "まだ保存済み動画はありません。"}
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-start">
         <div className="grid gap-8">
-          <div className="grid gap-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <video
-              ref={videoRef}
-              preload="auto"
-              controls
-              style={{
-                width: "100%",
-                height: "auto",
-                background: "#000",
-                objectFit: "contain",
-              }}
-              onSeeked={onVideoSeeked}
-              onPlay={startFromVideo}
-              onPause={onVideoPause}
-              onEnded={onVideoPause}
-            />
+          <div
+            ref={playerShellRef}
+            className={
+              isPseudoFullscreen
+                ? "fixed inset-0 z-50 flex flex-col overflow-hidden bg-black"
+                : isPlayerFullscreen
+                  ? "relative flex h-full w-full flex-col overflow-hidden bg-black"
+                  : "grid gap-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+            }
+            style={isPlayerFullscreen ? { height: "100dvh" } : undefined}
+          >
+            <div
+              className={
+                isPlayerFullscreen
+                  ? "relative min-h-0 flex-1 overflow-hidden bg-black"
+                  : "relative overflow-hidden rounded-xl bg-black"
+              }
+            >
+              {localSourceReady && !isPlayerFullscreen && (
+                <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-end p-3">
+                  <button
+                    type="button"
+                    onClick={() => void togglePlayerFullscreen()}
+                    className="pointer-events-auto rounded-full bg-slate-950/80 px-4 py-2 text-sm font-semibold text-white backdrop-blur"
+                  >
+                    全画面操作
+                  </button>
+                </div>
+              )}
+              <video
+                ref={videoRef}
+                preload="auto"
+                controls
+                playsInline
+                controlsList="nofullscreen noremoteplayback"
+                disablePictureInPicture
+                onClick={onVideoSurfaceClick}
+                onDoubleClick={onVideoSurfaceDoubleClick}
+                style={{
+                  width: "100%",
+                  height: isPlayerFullscreen ? "100%" : "auto",
+                  background: "#000",
+                  objectFit: "contain",
+                  cursor: localSourceReady ? "pointer" : "default",
+                }}
+                onSeeking={onVideoSeeking}
+                onSeeked={onVideoSeeked}
+                onPlay={startFromVideo}
+                onPause={onVideoPause}
+                onEnded={onVideoPause}
+              />
+
+              {isPlayerFullscreen && (
+                <>
+                  <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-2 p-1">
+                    <div className="pointer-events-auto rounded-full bg-black/60 px-3 py-1 text-xs font-medium text-white/90 backdrop-blur">
+                      速度 {playbackRate.toFixed(2)}x / オフセット {offsetSec.toFixed(3)} 秒
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setFullscreenControlsOpen((current) => !current)}
+                        className="pointer-events-auto rounded-full bg-black/60 px-3 py-2 text-xs font-semibold text-white backdrop-blur"
+                      >
+                        {fullscreenControlsOpen ? "操作を隠す" : "操作を表示"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void exitPlayerFullscreen()}
+                        className="pointer-events-auto rounded-full bg-white px-3 py-2 text-xs font-semibold text-slate-900"
+                      >
+                        閉じる
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    className={`pointer-events-none absolute inset-x-0 bottom-0 top-12 z-20 px-0.5 pb-0.5 transition duration-200 ${
+                      fullscreenControlsOpen
+                        ? "translate-y-0 opacity-100"
+                        : "translate-y-4 opacity-0"
+                    }`}
+                  >
+                    <div className="flex h-full items-stretch justify-between gap-1">
+                      <div className="pointer-events-auto flex h-full w-[min(8.5rem,20vw)] flex-col rounded-[1.25rem] border border-white/10 bg-slate-950/88 p-3 text-white shadow-2xl backdrop-blur">
+                        <div className="grid gap-3">
+                          <div className="flex min-h-11 items-center px-1">
+                            <button
+                              type="button"
+                              onClick={() => adjustPlaybackRate(-0.05)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              -0.05
+                            </button>
+                          </div>
+
+                          <div className="flex min-h-11 items-center px-1">
+                            <button
+                              type="button"
+                              onClick={() => adjustOffset(-0.005)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              -0.005
+                            </button>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+                            ブクマ{bookmarks.length}件
+                          </div>
+                        </div>
+                        <div className="mt-2 min-h-0 flex-1 overflow-auto">
+                          {bookmarks.length > 0 ? (
+                            <div className="grid gap-2">
+                              {bookmarks.map((bookmark, index) => (
+                                <div
+                                  key={bookmark.id}
+                                  className="grid gap-2 rounded-2xl border border-white/10 bg-white/5 p-3"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => jumpToBookmark(bookmark.timeSec)}
+                                    className="grid gap-1 text-left"
+                                  >
+                                    <span className="text-xs text-slate-400">
+                                      #{index + 1}
+                                      {index < 10 ? ` / ${index === 9 ? 0 : index + 1}` : ""}
+                                    </span>
+                                    <span className="font-mono text-sm text-white">
+                                      {formatBookmarkTime(bookmark.timeSec)}
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => deleteBookmark(bookmark.id)}
+                                    className="rounded-full border border-white/10 px-2 py-1.5 text-[11px] font-semibold text-slate-200"
+                                  >
+                                    削除
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="rounded-2xl border border-dashed border-white/10 px-3 py-4 text-center text-xs text-slate-400">
+                              まだブックマークはありません。
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="pointer-events-auto flex h-full w-[min(9.5rem,22vw)] flex-col rounded-[1.25rem] border border-white/10 bg-slate-950/88 p-3 text-white shadow-2xl backdrop-blur">
+                        <div className="grid gap-3">
+                          <div className="flex min-h-11 items-center justify-end px-1">
+                            <button
+                              type="button"
+                              onClick={() => adjustPlaybackRate(0.05)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              +0.05
+                            </button>
+                          </div>
+
+                          <div className="flex min-h-11 items-center justify-end px-1">
+                            <button
+                              type="button"
+                              onClick={() => adjustOffset(0.005)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              +0.005
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 grid gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void togglePlayback()}
+                            disabled={localControlsDisabled}
+                            className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 disabled:opacity-50"
+                          >
+                            {playing ? "一時停止" : "再生"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={saveBookmarkAtCurrentTime}
+                            disabled={localControlsDisabled}
+                            className="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-100 disabled:opacity-50"
+                          >
+                            保存
+                          </button>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => seekVideoBy(-5)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              -5
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => seekVideoBy(5)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              +5
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => seekVideoBy(-10)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              -10
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => seekVideoBy(10)}
+                              disabled={localControlsDisabled}
+                              className="rounded-full border border-white/15 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                            >
+                              +10
+                            </button>
+                          </div>
+                        </div>
+
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
             <video
               ref={audioRef}
               preload="auto"
@@ -986,61 +2243,63 @@ export default function Player() {
           </div>
 
           <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={() => {
-                  const v = videoRef.current;
-                  if (!v) return;
-                  v.currentTime = clamp(v.currentTime - 10, 0, v.duration || Infinity);
-                }}
-                disabled={localControlsDisabled}
-              >
-                -10秒
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const v = videoRef.current;
-                  if (!v) return;
-                  v.currentTime = clamp(v.currentTime - 5, 0, v.duration || Infinity);
-                }}
-                disabled={localControlsDisabled}
-              >
-                -5秒
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const v = videoRef.current;
-                  if (!v) return;
-                  v.currentTime = clamp(v.currentTime + 5, 0, v.duration || Infinity);
-                }}
-                disabled={localControlsDisabled}
-              >
-                +5秒
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const v = videoRef.current;
-                  if (!v) return;
-                  v.currentTime = clamp(v.currentTime + 10, 0, v.duration || Infinity);
-                }}
-                disabled={localControlsDisabled}
-              >
-                +10秒
-              </button>
+            <div className="grid gap-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  {bookmarks.length > 0 ? (
+                    <div className="flex gap-2 overflow-x-auto pb-1">
+                      {bookmarks.map((bookmark, index) => (
+                        <div
+                          key={bookmark.id}
+                          className="grid min-w-32 gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => jumpToBookmark(bookmark.timeSec)}
+                            className="grid gap-1 text-left"
+                          >
+                            <span className="text-xs text-slate-500">
+                              #{index + 1}
+                              {index < 10 ? ` / ${index === 9 ? 0 : index + 1}` : ""}
+                            </span>
+                            <span className="font-mono text-sm text-slate-900">
+                              {formatBookmarkTime(bookmark.timeSec)}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteBookmark(bookmark.id)}
+                            className="rounded-full border border-slate-300 px-2 py-1.5 text-[11px] font-semibold text-slate-700 hover:border-slate-400"
+                          >
+                            削除
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-center text-sm text-slate-500">
+                      まだブックマークはありません。
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={saveBookmarkAtCurrentTime}
+                  disabled={localControlsDisabled}
+                  className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  ブックマーク保存
+                </button>
+              </div>
             </div>
 
             <div style={{ display: "grid", gap: 8 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <span>再生速度:</span>
-                <span>{playbackRate.toFixed(2)}x</span>
                 <button
                   type="button"
                   aria-label="再生速度を下げる"
-                  onClick={() => setPlaybackRate((r) => clamp(r - 0.05, 0.1, 2.0))}
+                  onClick={() => adjustPlaybackRate(-0.05)}
                   disabled={localControlsDisabled}
                   style={iconButtonStyle}
                 >
@@ -1058,30 +2317,25 @@ export default function Player() {
                 />
                 <button
                   type="button"
-                  onClick={() => setPlaybackRate(1.0)}
-                  disabled={localControlsDisabled}
-                  className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:border-slate-400 disabled:opacity-60"
-                >
-                  リセット
-                </button>
-                <button
-                  type="button"
                   aria-label="再生速度を上げる"
-                  onClick={() => setPlaybackRate((r) => clamp(r + 0.05, 0.1, 2.0))}
+                  onClick={() => adjustPlaybackRate(0.05)}
                   disabled={localControlsDisabled}
                   style={iconButtonStyle}
                 >
                   <PlusIcon />
                 </button>
+                <span className="min-w-20 text-right font-semibold">
+                  {playbackRate.toFixed(2)}x
+                </span>
               </div>
 
               <div style={{ display: "grid", gap: 6 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <span>音声オフセット: {offsetSec.toFixed(3)} 秒</span>
+                  <span>音声オフセット:</span>
                   <button
                     type="button"
                     aria-label="音声オフセットを下げる"
-                    onClick={() => setOffsetSec((v) => clamp(v - 0.005, -0.3, 0.3))}
+                    onClick={() => adjustOffset(-0.005)}
                     disabled={localControlsDisabled}
                     style={iconButtonStyle}
                   >
@@ -1104,21 +2358,16 @@ export default function Player() {
                   />
                   <button
                     type="button"
-                    onClick={() => setOffsetSec(0)}
-                    disabled={localControlsDisabled}
-                    className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:border-slate-400 disabled:opacity-60"
-                  >
-                    リセット
-                  </button>
-                  <button
-                    type="button"
                     aria-label="音声オフセットを上げる"
-                    onClick={() => setOffsetSec((v) => clamp(v + 0.005, -0.3, 0.3))}
+                    onClick={() => adjustOffset(0.005)}
                     disabled={localControlsDisabled}
                     style={iconButtonStyle}
                   >
                     <PlusIcon />
                   </button>
+                  <span className="min-w-24 text-right font-semibold">
+                    {offsetSec.toFixed(3)} 秒
+                  </span>
                 </div>
                 {sourceOrigin === "youtube" && (
                   <p className="text-xs text-slate-500">
@@ -1227,9 +2476,9 @@ export default function Player() {
 
         <aside className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm lg:sticky lg:top-4">
           <div className="grid gap-2">
-            <div className="text-sm font-semibold text-slate-900">再生時間ブックマーク</div>
+            <div className="text-sm font-semibold text-slate-900">操作メモ</div>
             <p className="text-xs text-slate-500">
-              現在位置を保存して、クリックでその時間へ移動できます。
+              ブックマークは左側の一覧から選んで移動できます。
             </p>
             <p className="text-xs text-slate-500">
               `1` から `9`、`0` で 10 件目へ移動できます。
@@ -1238,54 +2487,22 @@ export default function Player() {
               `q/e` でオフセット、`a/d` で再生速度を調整できます。
             </p>
             <p className="text-xs text-slate-500">`f` でフルスクリーン切替ができます。</p>
-            <p className="text-xs text-slate-500">`Space` で再生 / 一時停止できます。</p>
+            <p className="text-xs text-slate-500">
+              スマホでは動画右上の「全画面操作」を使うと、全画面中も下の操作パネルを触れます。
+            </p>
+            <p className="text-xs text-slate-500">動画をクリックして再生 / 一時停止できます。</p>
+            <p className="text-xs text-slate-500">`Space / k` で再生 / 一時停止できます。</p>
             <p className="text-xs text-slate-500">`b` で現在位置をブックマーク保存できます。</p>
             <p className="text-xs text-slate-500">左右矢印で 5 秒前 / 5 秒後へ移動できます。</p>
+            <p className="text-xs text-slate-500">`j/l` で 10 秒前 / 10 秒後へ移動できます。</p>
           </div>
-          <button
-            type="button"
-            onClick={saveBookmarkAtCurrentTime}
-            disabled={localControlsDisabled}
-            className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-          >
-            保存
-          </button>
-          {bookmarks.length > 0 ? (
-            <div className="grid gap-2">
-              {bookmarks.map((bookmark, index) => (
-                <div key={bookmark.id} className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => jumpToBookmark(bookmark.timeSec)}
-                    className="grid flex-1 gap-1 rounded-lg border border-slate-200 px-3 py-2 text-left hover:border-slate-400"
-                  >
-                    <span className="text-xs text-slate-500">
-                      #{index + 1}
-                      {index < 10 ? ` / ${index === 9 ? 0 : index + 1}` : ""}
-                    </span>
-                    <span className="font-mono text-sm text-slate-900">
-                      {formatBookmarkTime(bookmark.timeSec)}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => deleteBookmark(bookmark.id)}
-                    className="rounded-md border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:border-slate-400"
-                  >
-                    削除
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">
-              まだブックマークはありません。
-            </div>
-          )}
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-6 text-center text-sm text-slate-500">
+            ブックマークは下の操作パネルに移動しました。
+          </div>
         </aside>
       </section>
 
-      {sourceMode === "youtube-search" && (
+      {(youtubeWarning || youtubeSourceReady || youtubeImportError) && (
         <section className="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <p className="text-sm text-slate-600">
             YouTube ソースは `yt-dlp` で MP4 として取り込むと、下のローカル再生フローに移ります。
@@ -1383,6 +2600,25 @@ export default function Player() {
           )}
         </section>
       )}
+
+      <section className="grid gap-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <a
+          href="https://maimai.sega.jp/song/new/"
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm font-medium text-slate-900 underline underline-offset-4"
+        >
+          maimai 新曲
+        </a>
+        <a
+          href="https://qman11010101.github.io/constant-table/maimai.html"
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm font-medium text-slate-900 underline underline-offset-4"
+        >
+          maimai 曲リスト
+        </a>
+      </section>
     </div>
   );
 }
@@ -1444,6 +2680,93 @@ function formatBookmarkTime(value: number) {
 
 function getSourceBaselineOffsetSec(sourceOrigin: SourceOrigin) {
   return sourceOrigin === "youtube" ? YOUTUBE_IMPORT_BASELINE_OFFSET_SEC : 0;
+}
+
+function getDefaultLibraryTitle(fileName: string) {
+  const trimmed = fileName.trim();
+  if (!trimmed) {
+    return "保存動画";
+  }
+
+  return trimmed.replace(/\.[^/.]+$/, "") || trimmed;
+}
+
+function normalizeLibraryTitleForSave(
+  title: string,
+  youtubeVideoId: string | null,
+  sourceUrl: string | null
+) {
+  const normalizedVideoId =
+    youtubeVideoId ?? extractYouTubeVideoId(sourceUrl ?? "") ?? "youtube-video";
+  const trimmed = title.trim().slice(0, 160);
+
+  return trimmed || `YouTube video (${normalizedVideoId})`;
+}
+
+function createLibrarySaveSignature(input: {
+  title: string;
+  offsetSec: number;
+  trimStartSec: number | null;
+  trimEndSec: number | null;
+  bookmarks: PlaybackBookmark[];
+}) {
+  return JSON.stringify({
+    title: input.title,
+    offsetSec: input.offsetSec,
+    trimStartSec: input.trimStartSec,
+    trimEndSec: input.trimEndSec,
+    bookmarks: input.bookmarks,
+  });
+}
+
+function upsertSavedItem(current: SavedMediaItem[], nextItem: SavedMediaItem) {
+  return sortSavedItems([...current.filter((item) => item.id !== nextItem.id), nextItem]);
+}
+
+function sortSavedItems(items: SavedMediaItem[]) {
+  return [...items].sort(
+    (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+  );
+}
+
+function formatSavedItemStorage(item: SavedMediaItem) {
+  if (item.sourceOrigin === "youtube" && item.sourceUrl && item.fileSizeBytes <= 0) {
+    return "YouTube 保存";
+  }
+
+  return formatFileSize(item.fileSizeBytes);
+}
+
+function formatFileSize(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = unitIndex === 0 ? 0 : size >= 100 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatRelativeDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function MinusIcon() {

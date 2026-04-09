@@ -1,18 +1,42 @@
 services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: my_app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d my_app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env.production
     environment:
+      DATABASE_URL: postgresql://app:app@db:5432/my_app
       YOUTUBE_IMPORT_TMP_ROOT: /tmp/youtube-imports
+      MEDIA_STORAGE_ROOT: /app/storage/media
       YT_DLP_PATH: yt-dlp
       FFMPEG_PATH: ffmpeg
     expose:
       - "3000"
+    command: ["sh", "-c", "npm run db:migrate && npm start"]
     volumes:
       - app_tmp:/tmp/youtube-imports
+      - app_media:/app/storage/media
       - ./secrets:/run/secrets:ro
     restart: unless-stopped
 
@@ -27,4 +51,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   app_tmp:
+  app_media:
