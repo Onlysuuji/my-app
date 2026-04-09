@@ -70,7 +70,7 @@ const exportResolutionOptions: Array<{
 
 export default function Player() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const audioRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const playerShellRef = useRef<HTMLDivElement | null>(null);
 
@@ -127,6 +127,7 @@ export default function Player() {
   const [currentYouTubeVideoId, setCurrentYouTubeVideoId] = useState<string | null>(null);
   const [fullscreenMode, setFullscreenMode] = useState<"off" | "native" | "pseudo">("off");
   const [fullscreenControlsOpen, setFullscreenControlsOpen] = useState(false);
+  const [mediaReadyForPlayback, setMediaReadyForPlayback] = useState(false);
   const exportStartedAtRef = useRef(0);
   const exportProgressRef = useRef(0);
 
@@ -144,11 +145,12 @@ export default function Player() {
   const seekTokenRef = useRef(0);
   const playStartTokenRef = useRef(0);
   const boundMediaSourceKeyRef = useRef<string | null>(null);
+  const mediaReadyWaitTokenRef = useRef(0);
 
   const urlForCleanup = useRef<string | null>(null);
   const localSourceReady = !!srcUrl && !!sourceFile;
   const youtubeSourceReady = sourceMode !== "local" && youtubeSource !== null;
-  const localControlsDisabled = !localSourceReady;
+  const localControlsDisabled = !localSourceReady || !mediaReadyForPlayback;
   const usesDetachedAudio = localSourceReady;
   const effectiveOffsetSec = offsetSec + getSourceBaselineOffsetSec(sourceOrigin);
   const canSaveYouTubeMedia = sourceOrigin === "youtube" && !!currentSourceUrl;
@@ -185,6 +187,7 @@ export default function Player() {
 
   const stopLocalPlayback = () => {
     playStartTokenRef.current += 1;
+    mediaReadyWaitTokenRef.current += 1;
     isVideoSeekingRef.current = false;
     resumeAudioAfterSeekRef.current = false;
     if (autoSaveTimeoutRef.current !== null) {
@@ -194,18 +197,19 @@ export default function Player() {
     videoRef.current?.pause();
     audioRef.current?.pause();
     setPlaying(false);
+    setMediaReadyForPlayback(false);
   };
 
   const seekVideoBy = useCallback((deltaSec: number) => {
     const video = videoRef.current;
-    if (!video || !localSourceReady) return;
+    if (!video || localControlsDisabled) return;
 
     video.currentTime = clamp(video.currentTime + deltaSec, 0, video.duration || Infinity);
-  }, [localSourceReady]);
+  }, [localControlsDisabled]);
 
-  const togglePlayback = async () => {
+  const togglePlayback = useCallback(async () => {
     const video = videoRef.current;
-    if (!video || !localSourceReady) return;
+    if (!video || localControlsDisabled) return;
 
     if (video.paused) {
       await video.play().catch(() => {});
@@ -213,10 +217,10 @@ export default function Player() {
     }
 
     video.pause();
-  };
+  }, [localControlsDisabled]);
 
   const onVideoSurfaceClick = () => {
-    if (!localSourceReady) return;
+    if (localControlsDisabled) return;
 
     if (surfaceClickTimeoutRef.current !== null) {
       window.clearTimeout(surfaceClickTimeoutRef.current);
@@ -233,7 +237,7 @@ export default function Player() {
   };
 
   const onVideoSurfaceDoubleClick = (event: React.MouseEvent<HTMLVideoElement>) => {
-    if (!localSourceReady) return;
+    if (localControlsDisabled) return;
 
     if (surfaceClickTimeoutRef.current !== null) {
       window.clearTimeout(surfaceClickTimeoutRef.current);
@@ -319,6 +323,17 @@ export default function Player() {
     return createLibrarySaveSignature(buildCurrentLibrarySaveState());
   }, [buildCurrentLibrarySaveState]);
 
+  const syncMediaReadyState = useCallback(() => {
+    const video = videoRef.current;
+    const audio = audioRef.current;
+    const ready =
+      isMediaReadyForPlayback(video) &&
+      (!usesDetachedAudio || isMediaReadyForPlayback(audio));
+
+    setMediaReadyForPlayback(ready);
+    return ready;
+  }, [usesDetachedAudio]);
+
   const syncDetachedAudioToVideo = useCallback(() => {
     if (!localSourceReady || !usesDetachedAudio) return null;
 
@@ -337,7 +352,7 @@ export default function Player() {
   }, [effectiveOffsetSec, localSourceReady, playbackRate, usesDetachedAudio]);
 
   const resumeDetachedAudio = useCallback(() => {
-    if (!localSourceReady || !usesDetachedAudio || !srcUrl) return;
+    if (!localSourceReady || !usesDetachedAudio || !srcUrl || !mediaReadyForPlayback) return;
 
     const syncedMedia = syncDetachedAudioToVideo();
     if (!syncedMedia) return;
@@ -367,7 +382,7 @@ export default function Player() {
           console.error("audio play failed:", err);
         }
       });
-  }, [localSourceReady, srcUrl, syncDetachedAudioToVideo, usesDetachedAudio]);
+  }, [localSourceReady, mediaReadyForPlayback, srcUrl, syncDetachedAudioToVideo, usesDetachedAudio]);
 
   const onSourceModeChange = (nextMode: SourceMode) => {
     if (nextMode === sourceMode) return;
@@ -452,7 +467,7 @@ export default function Player() {
 
   const saveBookmarkAtCurrentTime = () => {
     const video = videoRef.current;
-    if (!video || !localSourceReady) return;
+    if (!video || localControlsDisabled) return;
 
     const timeSec = roundBookmarkTime(video.currentTime);
     setBookmarks((current) =>
@@ -462,7 +477,7 @@ export default function Player() {
 
   const jumpToBookmark = (timeSec: number) => {
     const video = videoRef.current;
-    if (!video || !localSourceReady) return;
+    if (!video || localControlsDisabled) return;
 
     video.currentTime = clamp(timeSec, 0, video.duration || Infinity);
   };
@@ -885,7 +900,7 @@ export default function Player() {
   const startFromVideo = () => {
     const v = videoRef.current;
     const a = audioRef.current;
-    if (!localSourceReady || !v || !a || !srcUrl) return;
+    if (!localSourceReady || !mediaReadyForPlayback || !v || !a || !srcUrl) return;
     if (!a.paused) return;
 
     isVideoSeekingRef.current = false;
@@ -1364,32 +1379,17 @@ export default function Player() {
         return;
       }
       if (event.code === "Space") {
-        const video = videoRef.current;
-        if (!video) return;
-
         event.preventDefault();
-        if (video.paused) {
-          void video.play().catch(() => {});
-          return;
-        }
-
-        video.pause();
+        void togglePlayback();
         return;
       }
       if (lowerKey === "k") {
-        const video = videoRef.current;
-        if (!video) return;
-
         event.preventDefault();
-        if (video.paused) {
-          void video.play().catch(() => {});
-          return;
-        }
-
-        video.pause();
+        void togglePlayback();
         return;
       }
       if (lowerKey === "b") {
+        if (localControlsDisabled) return;
         const video = videoRef.current;
         if (!video) return;
 
@@ -1401,11 +1401,13 @@ export default function Player() {
         return;
       }
       if (lowerKey === "j" || lowerKey === "l") {
+        if (localControlsDisabled) return;
         event.preventDefault();
         seekVideoBy(lowerKey === "j" ? -10 : 10);
         return;
       }
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        if (localControlsDisabled) return;
         event.preventDefault();
         seekVideoBy(event.key === "ArrowLeft" ? -5 : 5);
         return;
@@ -1416,7 +1418,7 @@ export default function Player() {
 
       const bookmark = bookmarks[bookmarkIndex];
       const video = videoRef.current;
-      if (!bookmark || !video) return;
+      if (!bookmark || !video || localControlsDisabled) return;
 
       event.preventDefault();
       video.currentTime = clamp(bookmark.timeSec, 0, video.duration || Infinity);
@@ -1432,8 +1434,10 @@ export default function Player() {
     bookmarks,
     exitPlayerFullscreen,
     isPseudoFullscreen,
+    localControlsDisabled,
     localSourceReady,
     seekVideoBy,
+    togglePlayback,
     togglePlayerFullscreen,
   ]);
 
@@ -1454,6 +1458,7 @@ export default function Player() {
 
     if (localSourceReady && srcUrl) {
       boundMediaSourceKeyRef.current = mediaSourceKey;
+      setMediaReadyForPlayback(false);
       v.src = srcUrl;
       v.muted = false;
       v.volume = usesDetachedAudio ? 0 : 1;
@@ -1476,11 +1481,55 @@ export default function Player() {
     }
 
     boundMediaSourceKeyRef.current = null;
+    setMediaReadyForPlayback(false);
     v.removeAttribute("src");
     a.removeAttribute("src");
     v.load();
     a.load();
   }, [localSourceReady, srcUrl, usesDetachedAudio]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const audio = audioRef.current;
+
+    if (!localSourceReady || !srcUrl || !video) {
+      setMediaReadyForPlayback(false);
+      return;
+    }
+
+    const token = ++mediaReadyWaitTokenRef.current;
+    if (syncMediaReadyState()) {
+      return;
+    }
+
+    setMediaReadyForPlayback(false);
+
+    let cancelled = false;
+    const waitForReady = async () => {
+      try {
+        await waitForPlayableMedia(video, mediaReadyWaitTokenRef, token);
+        if (usesDetachedAudio && audio) {
+          await waitForPlayableMedia(audio, mediaReadyWaitTokenRef, token);
+        }
+        if (!cancelled && token === mediaReadyWaitTokenRef.current) {
+          syncMediaReadyState();
+        }
+      } catch {
+        if (!cancelled && token === mediaReadyWaitTokenRef.current) {
+          setMediaReadyForPlayback(false);
+        }
+      }
+    };
+
+    void waitForReady();
+
+    return () => {
+      cancelled = true;
+      if (token === mediaReadyWaitTokenRef.current) {
+        mediaReadyWaitTokenRef.current += 1;
+      }
+    };
+  }, [localSourceReady, srcUrl, syncMediaReadyState, usesDetachedAudio]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1518,11 +1567,12 @@ export default function Player() {
 
     v.muted = false;
     v.volume = usesDetachedAudio ? 0 : 1;
-    if (playing && a.paused && !isVideoSeekingRef.current) {
+    if (playing && mediaReadyForPlayback && a.paused && !isVideoSeekingRef.current) {
       resumeDetachedAudio();
     }
   }, [
     localSourceReady,
+    mediaReadyForPlayback,
     playing,
     resumeDetachedAudio,
     usesDetachedAudio,
@@ -2028,7 +2078,7 @@ export default function Player() {
               <video
                 ref={videoRef}
                 preload="auto"
-                controls
+                controls={mediaReadyForPlayback}
                 playsInline
                 controlsList="nofullscreen noremoteplayback"
                 disablePictureInPicture
@@ -2047,6 +2097,14 @@ export default function Player() {
                 onPause={onVideoPause}
                 onEnded={onVideoPause}
               />
+
+              {localSourceReady && !mediaReadyForPlayback && (
+                <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/78 px-6 text-center text-white">
+                  <div className="rounded-full border border-white/20 bg-black/50 px-5 py-3 text-sm font-medium backdrop-blur">
+                    動画と音声を読み込み中…
+                  </div>
+                </div>
+              )}
 
               {isPlayerFullscreen && (
                 <>
@@ -2234,10 +2292,9 @@ export default function Player() {
                 </>
               )}
             </div>
-            <video
+            <audio
               ref={audioRef}
               preload="auto"
-              playsInline
               style={{ display: "none" }}
             />
           </div>
@@ -2808,6 +2865,58 @@ function PlusIcon() {
 
 function isPlayInterruptedError(err: unknown) {
   return err instanceof DOMException && err.name === "AbortError";
+}
+
+function isMediaReadyForPlayback(media: HTMLMediaElement | null) {
+  return Boolean(media && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA);
+}
+
+function waitForPlayableMedia(
+  media: HTMLMediaElement,
+  tokenRef: { current: number },
+  token: number
+) {
+  if (isMediaReadyForPlayback(media)) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const finish = (callback: () => void) => {
+      cleanup();
+      callback();
+    };
+
+    const handleReady = () => {
+      if (token !== tokenRef.current) {
+        finish(() => reject(new Error("stale media load wait")));
+        return;
+      }
+
+      if (isMediaReadyForPlayback(media)) {
+        finish(resolve);
+      }
+    };
+
+    const handleError = () => {
+      finish(() => reject(new Error("media failed to become playable")));
+    };
+
+    const cleanup = () => {
+      media.removeEventListener("canplay", handleReady);
+      media.removeEventListener("canplaythrough", handleReady);
+      media.removeEventListener("loadeddata", handleReady);
+      media.removeEventListener("error", handleError);
+      media.removeEventListener("emptied", handleError);
+    };
+
+    media.addEventListener("canplay", handleReady);
+    media.addEventListener("canplaythrough", handleReady);
+    media.addEventListener("loadeddata", handleReady);
+    media.addEventListener("error", handleError);
+    media.addEventListener("emptied", handleError);
+
+    handleReady();
+  });
 }
 
 function parseFileNameFromContentDisposition(header: string | null) {

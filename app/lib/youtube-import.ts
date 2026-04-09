@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { promises as fs } from "fs";
+import { mkdirSync, promises as fs, writeFileSync } from "fs";
 import path from "path";
 
 const REPO_ROOT = process.cwd();
@@ -20,6 +20,7 @@ const FORMAT_SELECTORS = [
 ];
 
 let activeImportCount = 0;
+let generatedCookiesFilePath: string | null | undefined;
 
 type CommandResult = {
   stdout: string;
@@ -71,7 +72,7 @@ export async function importYouTubeVideo(options: {
     const outputTemplate = path.join(jobDir, "%(id)s.%(ext)s");
     const ytDlpPath = await resolveExecutablePath("YT_DLP_PATH", "yt-dlp");
     const ffmpegPath = await resolveExecutablePath("FFMPEG_PATH", "ffmpeg");
-    const cookieAuthStrategies = getYtDlpCookieStrategies();
+    const cookieAuthStrategies = await getYtDlpCookieStrategies();
     const maxFilesizeMb =
       parsePositiveInteger(process.env.YT_DLP_MAX_FILESIZE_MB) ?? DEFAULT_MAX_FILESIZE_MB;
     const timeoutMs = parsePositiveInteger(process.env.YT_DLP_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
@@ -721,8 +722,7 @@ function isVideoContainer(fileNameOrPath: string) {
 
 function getYtDlpCookieStrategies() {
   const strategies: CookieAuthStrategy[] = [];
-  const cookiesPath =
-    process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim();
+  const cookiesPath = resolveConfiguredCookiesPath();
   const cookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim();
 
   if (cookiesFromBrowser && process.env.NODE_ENV === "production") {
@@ -749,6 +749,77 @@ function getYtDlpCookieStrategies() {
   }
 
   return dedupeCookieStrategies(strategies);
+}
+
+function resolveConfiguredCookiesPath() {
+  const configuredPath =
+    process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim();
+  if (configuredPath) {
+    return configuredPath;
+  }
+
+  const inlineContentBase64 = process.env.YT_DLP_COOKIES_CONTENT_B64?.trim();
+  const inlineContent = process.env.YT_DLP_COOKIES_CONTENT;
+  if (!inlineContentBase64 && !inlineContent?.trim()) {
+    return null;
+  }
+
+  if (generatedCookiesFilePath !== undefined) {
+    return generatedCookiesFilePath;
+  }
+
+  generatedCookiesFilePath = materializeInlineCookiesFile({
+    inlineContent,
+    inlineContentBase64,
+  });
+  return generatedCookiesFilePath;
+}
+
+function materializeInlineCookiesFile(options: {
+  inlineContent?: string;
+  inlineContentBase64?: string;
+}) {
+  const fileContent = decodeInlineCookiesContent(options);
+  const authDir = path.join(TMP_ROOT, ".auth");
+  const cookiesPath = path.join(authDir, "youtube-cookies.txt");
+
+  mkdirSync(authDir, { recursive: true });
+  writeFileSync(cookiesPath, normalizeCookieFileContent(fileContent), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+
+  return cookiesPath;
+}
+
+function decodeInlineCookiesContent(options: {
+  inlineContent?: string;
+  inlineContentBase64?: string;
+}) {
+  if (options.inlineContentBase64) {
+    try {
+      return Buffer.from(options.inlineContentBase64, "base64").toString("utf8");
+    } catch {
+      throw new YouTubeImportError(
+        "`YT_DLP_COOKIES_CONTENT_B64` の base64 デコードに失敗しました。",
+        { code: "IMPORT_CONFIG", status: 500 }
+      );
+    }
+  }
+
+  const content = options.inlineContent?.trim();
+  if (!content) {
+    throw new YouTubeImportError(
+      "`YT_DLP_COOKIES_CONTENT` が空です。cookies.txt の内容を設定してください。",
+      { code: "IMPORT_CONFIG", status: 500 }
+    );
+  }
+
+  return content;
+}
+
+function normalizeCookieFileContent(value: string) {
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
 function getLocalBrowserCookieFallbacks(primaryBrowser: string | undefined) {
@@ -779,8 +850,7 @@ function dedupeCookieStrategies(strategies: CookieAuthStrategy[]) {
 // browser-cookie fallback is being phased in.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function getYtDlpCookieArgs() {
-  const cookiesPath =
-    process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim();
+  const cookiesPath = resolveConfiguredCookiesPath();
   if (cookiesPath) {
     return ["--cookies", cookiesPath];
   }
