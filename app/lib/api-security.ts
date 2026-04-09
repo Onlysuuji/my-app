@@ -138,18 +138,21 @@ export function enforceJsonRequest(request: NextRequest, maxContentLength = 8_19
 export function enforceSameOrigin(request: NextRequest) {
   if (process.env.NODE_ENV !== "production") return null;
 
-  const expectedOrigin = request.nextUrl.origin;
-  const origin = request.headers.get("origin");
+  const allowedOrigins = getAllowedOrigins(request);
+  const origin = normalizeOrigin(request.headers.get("origin"));
   if (origin) {
-    return origin === expectedOrigin
+    return allowedOrigins.has(origin)
       ? null
-      : NextResponse.json({ error: "同一オリジンからのアクセスのみ許可されています。" }, { status: 403 });
+      : NextResponse.json(
+          { error: "同一オリジンからのアクセスのみ許可されています。" },
+          { status: 403 }
+        );
   }
 
   const referer = request.headers.get("referer");
   if (referer) {
     try {
-      if (new URL(referer).origin === expectedOrigin) {
+      if (allowedOrigins.has(new URL(referer).origin)) {
         return null;
       }
     } catch {
@@ -169,4 +172,59 @@ export function enforceSameOrigin(request: NextRequest) {
     { error: "同一オリジンからのアクセスのみ許可されています。" },
     { status: 403 }
   );
+}
+
+function getAllowedOrigins(request: NextRequest) {
+  const allowedOrigins = new Set<string>();
+
+  addOrigin(allowedOrigins, request.nextUrl.origin);
+  addForwardedOrigin(
+    allowedOrigins,
+    request.headers.get("x-forwarded-proto"),
+    request.headers.get("x-forwarded-host")
+  );
+  addForwardedOrigin(
+    allowedOrigins,
+    request.headers.get("x-forwarded-proto"),
+    request.headers.get("host")
+  );
+
+  return allowedOrigins;
+}
+
+function addForwardedOrigin(
+  allowedOrigins: Set<string>,
+  protoHeader: string | null,
+  hostHeader: string | null
+) {
+  const host = readForwardedValue(hostHeader);
+  if (!host) return;
+
+  const proto = readForwardedValue(protoHeader) || inferSchemeFromHost(host);
+  addOrigin(allowedOrigins, `${proto}://${host}`);
+}
+
+function addOrigin(allowedOrigins: Set<string>, value: string | null | undefined) {
+  const normalized = normalizeOrigin(value);
+  if (normalized) {
+    allowedOrigins.add(normalized);
+  }
+}
+
+function normalizeOrigin(value: string | null | undefined) {
+  if (!value) return null;
+
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function readForwardedValue(value: string | null | undefined) {
+  return value?.split(",")[0]?.trim() || "";
+}
+
+function inferSchemeFromHost(host: string) {
+  return host.includes("localhost") || host.startsWith("127.0.0.1") ? "http" : "https";
 }
