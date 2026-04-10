@@ -2284,7 +2284,7 @@ export default function Player() {
                         disabled={itemActionsDisabled || isActive}
                         className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
                       >
-                        {isDeleting ? "削除中..." : isActive ? "現在の動画は削除不可" : "削除"}
+                        {isDeleting ? "削除中..." : "削除"}
                       </button>
                     </div>
                     {isAssigning && (

@@ -74,6 +74,7 @@ export async function importYouTubeVideo(options: {
     const ffmpegPath = await resolveExecutablePath("FFMPEG_PATH", "ffmpeg");
     const cookieAuthStrategies = await getYtDlpCookieStrategies();
     const ytDlpUserAgentArgs = await getYtDlpUserAgentArgs();
+    const ytDlpExtractorArgs = await getYtDlpExtractorArgs();
     const maxFilesizeMb =
       parsePositiveInteger(process.env.YT_DLP_MAX_FILESIZE_MB) ?? DEFAULT_MAX_FILESIZE_MB;
     const timeoutMs = parsePositiveInteger(process.env.YT_DLP_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
@@ -90,6 +91,7 @@ export async function importYouTubeVideo(options: {
         outputTemplate,
         timeoutMs,
         url: options.url,
+        ytDlpExtractorArgs,
         ytDlpUserAgentArgs,
         ytDlpPath,
       });
@@ -117,13 +119,19 @@ async function downloadVideoWithRetry(options: {
   outputTemplate: string;
   timeoutMs: number;
   url: string;
+  ytDlpExtractorArgs: string[];
   ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }) {
+  const requireCookies = shouldRequireCookies();
   if (options.cookieAuthStrategies.length) {
     const cookieResult = await tryDownloadWithCookieStrategies(options);
     if (cookieResult.importedPath) {
       return cookieResult.importedPath;
+    }
+
+    if (requireCookies) {
+      throw cookieResult.error ?? buildMissingCookiesError();
     }
 
     try {
@@ -141,6 +149,10 @@ async function downloadVideoWithRetry(options: {
     }
   }
 
+  if (requireCookies) {
+    throw buildMissingCookiesError();
+  }
+
   return await downloadVideoWithSelectors({
     ...options,
     cookieArgs: [],
@@ -156,6 +168,7 @@ async function tryDownloadWithCookieStrategies(options: {
   outputTemplate: string;
   timeoutMs: number;
   url: string;
+  ytDlpExtractorArgs: string[];
   ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }): Promise<{ importedPath: string | null; error: Error | null }> {
@@ -179,6 +192,7 @@ async function tryDownloadWithCookieStrategies(options: {
           strategyLabel: strategy.label,
           timeoutMs: options.timeoutMs,
           url: options.url,
+          ytDlpExtractorArgs: options.ytDlpExtractorArgs,
           ytDlpUserAgentArgs: options.ytDlpUserAgentArgs,
           ytDlpPath: options.ytDlpPath,
         });
@@ -205,6 +219,7 @@ async function downloadVideoWithSelectors(options: {
   outputTemplate: string;
   timeoutMs: number;
   url: string;
+  ytDlpExtractorArgs: string[];
   ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }) {
@@ -220,6 +235,7 @@ async function downloadVideoWithSelectors(options: {
           "--no-playlist",
           "--no-warnings",
           ...options.ytDlpUserAgentArgs,
+          ...options.ytDlpExtractorArgs,
           ...options.cookieArgs,
           "--print",
           "after_move:filepath",
@@ -578,6 +594,7 @@ async function diagnoseCookieFormatFailure(options: {
   strategyLabel: string;
   timeoutMs: number;
   url: string;
+  ytDlpExtractorArgs: string[];
   ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }) {
@@ -588,6 +605,7 @@ async function diagnoseCookieFormatFailure(options: {
         "--no-playlist",
         "--no-warnings",
         ...options.ytDlpUserAgentArgs,
+        ...options.ytDlpExtractorArgs,
         ...options.cookieArgs,
         "--list-formats",
         options.url,
@@ -674,6 +692,24 @@ async function getYtDlpUserAgentArgs() {
   }
 
   return ["--user-agent", configuredValue];
+}
+
+async function getYtDlpExtractorArgs() {
+  const configuredValue =
+    process.env.YT_DLP_EXTRACTOR_ARGS?.trim() ||
+    process.env.YT_DLP_YOUTUBE_EXTRACTOR_ARGS?.trim() ||
+    (await readEnvFileValue("YT_DLP_EXTRACTOR_ARGS"))?.trim() ||
+    (await readEnvFileValue("YT_DLP_YOUTUBE_EXTRACTOR_ARGS"))?.trim();
+
+  if (!configuredValue) {
+    return [];
+  }
+
+  const extractorArgs = configuredValue.includes(":")
+    ? configuredValue
+    : `youtube:${configuredValue}`;
+
+  return ["--extractor-args", extractorArgs];
 }
 
 async function resolveExecutablePath(envName: string, fallbackCommand: string) {
@@ -776,6 +812,13 @@ function getYtDlpCookieStrategies() {
   const cookiesPath = resolveConfiguredCookiesPath();
   const cookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim();
 
+  if (cookiesPath) {
+    strategies.push({
+      args: ["--cookies", cookiesPath],
+      label: "cookies-file",
+    });
+  }
+
   if (process.env.NODE_ENV !== "production") {
     for (const browser of getLocalBrowserCookieFallbacks(cookiesFromBrowser)) {
       strategies.push({
@@ -785,14 +828,26 @@ function getYtDlpCookieStrategies() {
     }
   }
 
-  if (cookiesPath) {
-    strategies.push({
-      args: ["--cookies", cookiesPath],
-      label: "cookies-file",
-    });
+  return dedupeCookieStrategies(strategies);
+}
+
+function shouldRequireCookies() {
+  const configured =
+    process.env.YT_DLP_REQUIRE_COOKIES?.trim() ||
+    process.env.YOUTUBE_IMPORT_REQUIRE_COOKIES?.trim();
+
+  if (configured) {
+    return /^(1|true|yes|on)$/i.test(configured);
   }
 
-  return dedupeCookieStrategies(strategies);
+  return process.env.NODE_ENV === "production";
+}
+
+function buildMissingCookiesError() {
+  return new YouTubeImportError(
+    "本番環境では YouTube 取り込みに cookies が必須です。`YT_DLP_COOKIES_CONTENT_B64` を設定してください。",
+    { code: "IMPORT_CONFIG", status: 500 }
+  );
 }
 
 function resolveConfiguredCookiesPath() {
