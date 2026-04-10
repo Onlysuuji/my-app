@@ -120,31 +120,55 @@ async function downloadVideoWithRetry(options: {
   ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }) {
-  try {
-    return await downloadVideoWithSelectors({
-      ...options,
-      cookieArgs: [],
-      label: "no-cookies",
-    });
-  } catch (error) {
-    if (
-      !options.cookieAuthStrategies.length ||
-      !(error instanceof Error) ||
-      !shouldRetryWithCookies(error)
-    ) {
-      throw error;
+  if (options.cookieAuthStrategies.length) {
+    const cookieResult = await tryDownloadWithCookieStrategies(options);
+    if (cookieResult.importedPath) {
+      return cookieResult.importedPath;
+    }
+
+    try {
+      return await downloadVideoWithSelectors({
+        ...options,
+        cookieArgs: [],
+        label: "no-cookies",
+      });
+    } catch (error) {
+      if (error instanceof Error && shouldRetryWithCookies(error) && cookieResult.error) {
+        throw cookieResult.error;
+      }
+
+      throw cookieResult.error ?? error;
     }
   }
 
+  return await downloadVideoWithSelectors({
+    ...options,
+    cookieArgs: [],
+    label: "no-cookies",
+  });
+}
+
+async function tryDownloadWithCookieStrategies(options: {
+  cookieAuthStrategies: CookieAuthStrategy[];
+  ffmpegPath: string;
+  jobDir: string;
+  maxFilesizeMb: number;
+  outputTemplate: string;
+  timeoutMs: number;
+  url: string;
+  ytDlpUserAgentArgs: string[];
+  ytDlpPath: string;
+}): Promise<{ importedPath: string | null; error: Error | null }> {
   let lastCookieError: Error | null = null;
 
   for (const strategy of options.cookieAuthStrategies) {
     try {
-      return await downloadVideoWithSelectors({
+      const importedPath = await downloadVideoWithSelectors({
         ...options,
         cookieArgs: strategy.args,
         label: strategy.label,
       });
+      return { importedPath, error: null };
     } catch (error) {
       if (
         error instanceof Error &&
@@ -169,7 +193,7 @@ async function downloadVideoWithRetry(options: {
     }
   }
 
-  throw lastCookieError ?? new Error("YouTube import failed.");
+  return { importedPath: null, error: lastCookieError ?? new Error("YouTube import failed.") };
 }
 
 async function downloadVideoWithSelectors(options: {
@@ -435,6 +459,8 @@ function shouldRetryWithCookies(error: Error) {
     /members-only/i,
     /private video/i,
     /bot 確認が必要/,
+    /映像トラック付きの MP4 を作れませんでした/,
+    /音声トラック付きの MP4 を作れませんでした/,
   ].some((pattern) => pattern.test(error.message));
 }
 
