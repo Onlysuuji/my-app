@@ -14,6 +14,7 @@ import {
 } from "./lib/youtube";
 import type {
   PlaybackBookmark,
+  SavedMediaFolder,
   SavedMediaItem,
   SessionUser,
 } from "./lib/account-types";
@@ -21,6 +22,7 @@ import type {
 type SourceMode = "local" | "youtube-url" | "youtube-search";
 type SourceOrigin = "local" | "youtube";
 type AccountFormMode = "login" | "register";
+type SavedFolderSelection = "all" | "unfiled" | string;
 
 type SearchYouTubeResponse = {
   items?: YouTubeVideoSummary[];
@@ -41,10 +43,18 @@ type AccountSessionResponse = {
 type LibraryItemsResponse = {
   items?: SavedMediaItem[];
   item?: SavedMediaItem;
+  folders?: SavedMediaFolder[];
+  error?: string;
+};
+
+type LibraryFoldersResponse = {
+  folders?: SavedMediaFolder[];
+  folder?: SavedMediaFolder;
   error?: string;
 };
 
 const YOUTUBE_IMPORT_BASELINE_OFFSET_SEC = -0.05;
+const UNFILED_FOLDER_SELECTION = "unfiled";
 
 // 同期方式は seekSync のみ使用
 const iconButtonStyle: React.CSSProperties = {
@@ -119,14 +129,21 @@ export default function Player() {
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [librarySaving, setLibrarySaving] = useState(false);
   const [libraryTitle, setLibraryTitle] = useState("");
+  const [savedFolders, setSavedFolders] = useState<SavedMediaFolder[]>([]);
+  const [selectedSavedFolderId, setSelectedSavedFolderId] =
+    useState<SavedFolderSelection>("all");
   const [activeSavedItemId, setActiveSavedItemId] = useState<string | null>(null);
   const [loadingSavedItemId, setLoadingSavedItemId] = useState<string | null>(null);
   const [deletingSavedItemId, setDeletingSavedItemId] = useState<string | null>(null);
   const [renamingSavedItemId, setRenamingSavedItemId] = useState<string | null>(null);
+  const [movingSavedItemId, setMovingSavedItemId] = useState<string | null>(null);
+  const [assigningSavedItemId, setAssigningSavedItemId] = useState<string | null>(null);
+  const [folderCreating, setFolderCreating] = useState(false);
   const [currentSourceUrl, setCurrentSourceUrl] = useState<string | null>(null);
   const [currentYouTubeVideoId, setCurrentYouTubeVideoId] = useState<string | null>(null);
   const [fullscreenMode, setFullscreenMode] = useState<"off" | "native" | "pseudo">("off");
   const [fullscreenControlsOpen, setFullscreenControlsOpen] = useState(false);
+  const [screenLocked, setScreenLocked] = useState(false);
   const [mediaReadyForPlayback, setMediaReadyForPlayback] = useState(false);
   const exportStartedAtRef = useRef(0);
   const exportProgressRef = useRef(0);
@@ -157,10 +174,21 @@ export default function Player() {
   const isPlayerFullscreen = fullscreenMode !== "off";
   const isPseudoFullscreen = fullscreenMode === "pseudo";
   const normalizedSavedItemsSearchQuery = savedItemsSearchQuery.trim().toLocaleLowerCase();
+  const folderFilteredSavedItems = savedItems.filter((item) => {
+    if (selectedSavedFolderId === "all") {
+      return true;
+    }
+
+    if (selectedSavedFolderId === UNFILED_FOLDER_SELECTION) {
+      return !item.folderId;
+    }
+
+    return item.folderId === selectedSavedFolderId;
+  });
   const filteredSavedItems =
     normalizedSavedItemsSearchQuery.length === 0
-      ? savedItems
-      : savedItems.filter((item) => {
+      ? folderFilteredSavedItems
+      : folderFilteredSavedItems.filter((item) => {
           const searchTargets = [item.title, item.sourceUrl, item.originalFileName];
           return searchTargets.some((value) =>
             (value ?? "").toLocaleLowerCase().includes(normalizedSavedItemsSearchQuery)
@@ -220,6 +248,7 @@ export default function Player() {
   }, [localControlsDisabled]);
 
   const onVideoSurfaceClick = () => {
+    if (screenLocked) return;
     if (localControlsDisabled) return;
 
     if (surfaceClickTimeoutRef.current !== null) {
@@ -237,6 +266,7 @@ export default function Player() {
   };
 
   const onVideoSurfaceDoubleClick = (event: React.MouseEvent<HTMLVideoElement>) => {
+    if (screenLocked) return;
     if (localControlsDisabled) return;
 
     if (surfaceClickTimeoutRef.current !== null) {
@@ -273,6 +303,7 @@ export default function Player() {
 
     setFullscreenMode("off");
     setFullscreenControlsOpen(false);
+    setScreenLocked(false);
   }, []);
 
   const enterPlayerFullscreen = useCallback(async () => {
@@ -280,6 +311,7 @@ export default function Player() {
     if (!playerShell) return;
 
     setFullscreenControlsOpen(true);
+    setScreenLocked(false);
 
     if (typeof playerShell.requestFullscreen === "function") {
       try {
@@ -325,14 +357,11 @@ export default function Player() {
 
   const syncMediaReadyState = useCallback(() => {
     const video = videoRef.current;
-    const audio = audioRef.current;
-    const ready =
-      isMediaReadyForPlayback(video) &&
-      (!usesDetachedAudio || isMediaReadyForPlayback(audio));
+    const ready = isMediaReadyForPlayback(video, 1);
 
     setMediaReadyForPlayback(ready);
     return ready;
-  }, [usesDetachedAudio]);
+  }, []);
 
   const syncDetachedAudioToVideo = useCallback(() => {
     if (!localSourceReady || !usesDetachedAudio) return null;
@@ -360,6 +389,8 @@ export default function Player() {
     const { video, audio } = syncedMedia;
     if (video.paused) return;
 
+    video.muted = true;
+    video.volume = 0;
     audio.muted = false;
     audio.volume = 1;
 
@@ -587,6 +618,7 @@ export default function Player() {
   const refreshSavedItems = useCallback(async () => {
     if (!sessionUser) {
       setSavedItems([]);
+      setSavedFolders([]);
       setLibraryLoading(false);
       return;
     }
@@ -604,6 +636,7 @@ export default function Player() {
       }
 
       setSavedItems(sortSavedItems(data.items ?? []));
+      setSavedFolders(sortSavedFolders(data.folders ?? []));
       setLibraryError(null);
     } catch (err) {
       setLibraryError(
@@ -666,6 +699,8 @@ export default function Player() {
 
       setSessionUser(null);
       setSavedItems([]);
+      setSavedFolders([]);
+      setSelectedSavedFolderId("all");
       setActiveSavedItemId(null);
       setLibraryError(null);
       lastSavedLibraryStateRef.current = null;
@@ -680,6 +715,10 @@ export default function Player() {
     if (!sessionUser || !canSaveYouTubeMedia) return;
 
     const currentSaveState = buildCurrentLibrarySaveState();
+    const newItemFolderId =
+      selectedSavedFolderId !== "all" && selectedSavedFolderId !== UNFILED_FOLDER_SELECTION
+        ? selectedSavedFolderId
+        : null;
     setLibrarySaving(true);
     setLibraryError(null);
 
@@ -721,6 +760,7 @@ export default function Player() {
             trimStartSec: currentSaveState.trimStartSec,
             trimEndSec: currentSaveState.trimEndSec,
             bookmarks: JSON.stringify(currentSaveState.bookmarks),
+            folderId: newItemFolderId,
           }),
         });
 
@@ -756,6 +796,7 @@ export default function Player() {
     canSaveYouTubeMedia,
     currentSourceUrl,
     currentYouTubeVideoId,
+    selectedSavedFolderId,
     sessionUser,
   ]);
 
@@ -816,6 +857,11 @@ export default function Player() {
   };
 
   const deleteSavedItemById = async (itemId: string) => {
+    if (activeSavedItemId === itemId) {
+      setLibraryError("読み込んでいる動画は削除できません。別の動画を読み込んでから削除してください。");
+      return;
+    }
+
     if (!window.confirm("この保存済み動画を削除しますか？")) {
       return;
     }
@@ -834,10 +880,6 @@ export default function Player() {
       }
 
       setSavedItems((current) => current.filter((item) => item.id !== itemId));
-      if (activeSavedItemId === itemId) {
-        setActiveSavedItemId(null);
-        lastSavedLibraryStateRef.current = null;
-      }
     } catch (err) {
       setLibraryError(
         err instanceof Error ? err.message : "保存済み動画の削除に失敗しました。"
@@ -896,6 +938,129 @@ export default function Player() {
     }
   };
 
+  const createSavedFolder = async () => {
+    const folderName = window.prompt("新しいフォルダ名");
+    if (folderName === null) {
+      return;
+    }
+
+    const normalizedName = folderName.trim().slice(0, 80);
+    if (!normalizedName) {
+      setLibraryError("フォルダ名を入力してください。");
+      return;
+    }
+
+    setFolderCreating(true);
+    setLibraryError(null);
+
+    try {
+      const response = await fetch("/api/library/folders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: normalizedName }),
+      });
+      const data = (await response.json()) as LibraryFoldersResponse;
+
+      if (!response.ok || !data.folder) {
+        throw new Error(data.error ?? "フォルダ作成に失敗しました。");
+      }
+
+      setSavedFolders((current) => sortSavedFolders([...current, data.folder!]));
+      setSelectedSavedFolderId(data.folder.id);
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : "フォルダ作成に失敗しました。");
+    } finally {
+      setFolderCreating(false);
+    }
+  };
+
+  const updateSavedItemFolder = async (item: SavedMediaItem, folderId: string | null) => {
+    if (item.folderId === folderId) {
+      return;
+    }
+
+    setAssigningSavedItemId(item.id);
+    setLibraryError(null);
+
+    try {
+      const response = await fetch(`/api/library/items/${item.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ folderId }),
+      });
+      const data = (await response.json()) as LibraryItemsResponse;
+
+      if (!response.ok || !data.item) {
+        throw new Error(data.error ?? "フォルダ移動に失敗しました。");
+      }
+
+      setSavedItems((current) => upsertSavedItem(current, data.item!));
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : "フォルダ移動に失敗しました。");
+    } finally {
+      setAssigningSavedItemId(null);
+    }
+  };
+
+  const moveSavedItem = async (item: SavedMediaItem, direction: -1 | 1) => {
+    const currentIndex = filteredSavedItems.findIndex((candidate) => candidate.id === item.id);
+    const nextIndex = currentIndex + direction;
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= filteredSavedItems.length) {
+      return;
+    }
+
+    const reorderedItems = [...filteredSavedItems];
+    const [movedItem] = reorderedItems.splice(currentIndex, 1);
+    reorderedItems.splice(nextIndex, 0, movedItem);
+
+    const baseSortOrder = Date.now();
+    const updates = reorderedItems.map((entry, index) => ({
+      item: entry,
+      sortOrder: baseSortOrder - index,
+    }));
+
+    setMovingSavedItemId(item.id);
+    setLibraryError(null);
+
+    try {
+      const updatedItems = await Promise.all(
+        updates.map(async (entry) => {
+          const response = await fetch(`/api/library/items/${entry.item.id}`, {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ sortOrder: entry.sortOrder }),
+          });
+          const data = (await response.json()) as LibraryItemsResponse;
+
+          if (!response.ok || !data.item) {
+            throw new Error(data.error ?? "並び替えに失敗しました。");
+          }
+
+          return data.item;
+        })
+      );
+
+      setSavedItems((current) =>
+        sortSavedItems(
+          current.map((currentItem) => {
+            const updatedItem = updatedItems.find((entry) => entry.id === currentItem.id);
+            return updatedItem ?? currentItem;
+          })
+        )
+      );
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : "並び替えに失敗しました。");
+    } finally {
+      setMovingSavedItemId(null);
+    }
+  };
+
   // 動画の controls から再生された場合の同期開始
   const startFromVideo = () => {
     const v = videoRef.current;
@@ -905,7 +1070,7 @@ export default function Player() {
 
     isVideoSeekingRef.current = false;
     resumeAudioAfterSeekRef.current = false;
-    v.muted = false;
+    v.muted = usesDetachedAudio;
     v.volume = usesDetachedAudio ? 0 : 1;
     a.muted = false;
     a.volume = 1;
@@ -1130,7 +1295,7 @@ export default function Player() {
     }
   }, [localSourceReady, playbackRate, usesDetachedAudio]);
 
-  // 同期ループ（ドラッグ中は補正しない / 100ms判定でジャンプ補正のみ）
+  // 同期ループ（小さいズレは速度補正、大きいズレだけシーク）
   useEffect(() => {
     if (!localSourceReady || !playing || !usesDetachedAudio) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -1153,20 +1318,25 @@ export default function Player() {
         return;
       }
 
-      // audioTime = videoTime - offsetSec
-      const expectedAudio = v.currentTime - effectiveOffsetSec;
+      const expectedAudio = clamp(
+        v.currentTime - effectiveOffsetSec,
+        0,
+        a.duration || Infinity
+      );
       const diff = a.currentTime - expectedAudio;
 
-      // 100msごとにズレを判定して、大きい時だけジャンプ補正
-      if (now - lastSyncCheckAtRef.current > 100) {
+      if (now - lastSyncCheckAtRef.current > 160) {
         lastSyncCheckAtRef.current = now;
 
-        if (Math.abs(diff) > 0.12) {
-          safeSetCurrentTime(a, clamp(expectedAudio, 0, a.duration || Infinity), seekTokenRef);
+        if (Math.abs(diff) > 0.45) {
+          safeSetCurrentTime(a, expectedAudio, seekTokenRef);
+          a.playbackRate = playbackRate;
+        } else if (Math.abs(diff) > 0.045) {
+          const correction = clamp(-diff * 0.08, -0.035, 0.035);
+          a.playbackRate = clamp(playbackRate + correction, 0.1, 2.0);
+        } else {
+          a.playbackRate = playbackRate;
         }
-
-        // うねり防止：常に基準速度へ戻す
-        a.playbackRate = playbackRate;
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -1227,6 +1397,8 @@ export default function Player() {
   useEffect(() => {
     if (!sessionUser) {
       setSavedItems([]);
+      setSavedFolders([]);
+      setSelectedSavedFolderId("all");
       setLibraryLoading(false);
       setActiveSavedItemId(null);
       lastSavedLibraryStateRef.current = null;
@@ -1293,6 +1465,7 @@ export default function Player() {
       if (playerShell && document.fullscreenElement === playerShell) {
         setFullscreenMode("native");
         setFullscreenControlsOpen(true);
+        setScreenLocked(false);
         return;
       }
 
@@ -1300,6 +1473,9 @@ export default function Player() {
       setFullscreenControlsOpen((current) =>
         document.fullscreenElement ? current : false
       );
+      if (!document.fullscreenElement) {
+        setScreenLocked(false);
+      }
     };
 
     document.addEventListener("fullscreenchange", onFullscreenChange);
@@ -1460,7 +1636,7 @@ export default function Player() {
       boundMediaSourceKeyRef.current = mediaSourceKey;
       setMediaReadyForPlayback(false);
       v.src = srcUrl;
-      v.muted = false;
+      v.muted = usesDetachedAudio;
       v.volume = usesDetachedAudio ? 0 : 1;
       v.load();
 
@@ -1507,16 +1683,24 @@ export default function Player() {
     let cancelled = false;
     const waitForReady = async () => {
       try {
-        await waitForPlayableMedia(video, mediaReadyWaitTokenRef, token);
-        if (usesDetachedAudio && audio) {
-          await waitForPlayableMedia(audio, mediaReadyWaitTokenRef, token);
-        }
+        await waitForPlayableMedia(video, mediaReadyWaitTokenRef, token, {
+          minimumReadyState: 1,
+          fallbackReadyState: 1,
+          timeoutMs: 2_500,
+        });
         if (!cancelled && token === mediaReadyWaitTokenRef.current) {
-          syncMediaReadyState();
+          setMediaReadyForPlayback(true);
+        }
+        if (usesDetachedAudio && audio) {
+          void waitForPlayableMedia(audio, mediaReadyWaitTokenRef, token, {
+            minimumReadyState: 1,
+            fallbackReadyState: 0,
+            timeoutMs: 2_500,
+          }).catch(() => {});
         }
       } catch {
         if (!cancelled && token === mediaReadyWaitTokenRef.current) {
-          setMediaReadyForPlayback(false);
+          setMediaReadyForPlayback(true);
         }
       }
     };
@@ -1565,7 +1749,7 @@ export default function Player() {
     const a = audioRef.current;
     if (!v || !a || !localSourceReady) return;
 
-    v.muted = false;
+    v.muted = usesDetachedAudio;
     v.volume = usesDetachedAudio ? 0 : 1;
     if (playing && mediaReadyForPlayback && a.paused && !isVideoSeekingRef.current) {
       resumeDetachedAudio();
@@ -1952,6 +2136,37 @@ export default function Player() {
             </div>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2">
+            <SavedFolderButton
+              label={`すべて ${savedItems.length}`}
+              active={selectedSavedFolderId === "all"}
+              onClick={() => setSelectedSavedFolderId("all")}
+            />
+            <SavedFolderButton
+              label={`未分類 ${savedItems.filter((item) => !item.folderId).length}`}
+              active={selectedSavedFolderId === UNFILED_FOLDER_SELECTION}
+              onClick={() => setSelectedSavedFolderId(UNFILED_FOLDER_SELECTION)}
+            />
+            {savedFolders.map((folder) => (
+              <SavedFolderButton
+                key={folder.id}
+                label={`${folder.name} ${
+                  savedItems.filter((item) => item.folderId === folder.id).length
+                }`}
+                active={selectedSavedFolderId === folder.id}
+                onClick={() => setSelectedSavedFolderId(folder.id)}
+              />
+            ))}
+            <button
+              type="button"
+              onClick={() => void createSavedFolder()}
+              disabled={folderCreating}
+              className="rounded-full border border-dashed border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-60"
+            >
+              {folderCreating ? "作成中..." : "フォルダ作成"}
+            </button>
+          </div>
+
           {libraryError && (
             <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
               {libraryError}
@@ -1971,11 +2186,19 @@ export default function Player() {
                     : "grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
                 }
               >
-              {filteredSavedItems.map((item) => {
+              {filteredSavedItems.map((item, index) => {
                 const isActive = item.id === activeSavedItemId;
                 const isLoading = item.id === loadingSavedItemId;
                 const isDeleting = item.id === deletingSavedItemId;
                 const isRenaming = item.id === renamingSavedItemId;
+                const isMoving = item.id === movingSavedItemId;
+                const isAssigning = item.id === assigningSavedItemId;
+                const itemActionsDisabled =
+                  !!loadingSavedItemId ||
+                  !!deletingSavedItemId ||
+                  !!renamingSavedItemId ||
+                  !!movingSavedItemId ||
+                  !!assigningSavedItemId;
 
                 return (
                   <div
@@ -1996,16 +2219,53 @@ export default function Player() {
                       <div className="text-xs text-slate-500">
                         {formatSavedItemStorage(item)} ・ 更新 {formatRelativeDate(item.updatedAt)}
                       </div>
+                      <div className="text-xs text-slate-500">
+                        {getSavedFolderLabel(savedFolders, item.folderId)}
+                      </div>
                     </div>
                     <div className="grid gap-1 text-xs text-slate-600">
                       <div>オフセット {item.offsetSec.toFixed(3)} 秒</div>
                       <div>ブックマーク {item.bookmarks.length} 件</div>
                     </div>
+                    <select
+                      value={item.folderId ?? ""}
+                      onChange={(event) =>
+                        void updateSavedItemFolder(item, event.target.value || null)
+                      }
+                      disabled={itemActionsDisabled}
+                      className="rounded-md border border-slate-300 px-2 py-1.5 text-xs text-slate-700 disabled:opacity-60"
+                      aria-label="保存先フォルダ"
+                    >
+                      <option value="">未分類</option>
+                      {savedFolders.map((folder) => (
+                        <option key={folder.id} value={folder.id}>
+                          {folder.name}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void moveSavedItem(item, -1)}
+                        disabled={itemActionsDisabled || index === 0}
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
+                      >
+                        {isMoving ? "移動中..." : "← 左へ"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void moveSavedItem(item, 1)}
+                        disabled={itemActionsDisabled || index === filteredSavedItems.length - 1}
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
+                      >
+                        {isMoving ? "移動中..." : "右へ →"}
+                      </button>
+                    </div>
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={() => void loadSavedItem(item)}
-                        disabled={!!loadingSavedItemId || !!deletingSavedItemId || !!renamingSavedItemId}
+                        disabled={itemActionsDisabled}
                         className="rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
                       >
                         {isLoading ? "読み込み中..." : "読み込む"}
@@ -2013,7 +2273,7 @@ export default function Player() {
                       <button
                         type="button"
                         onClick={() => void renameSavedItem(item)}
-                        disabled={!!loadingSavedItemId || !!deletingSavedItemId || !!renamingSavedItemId}
+                        disabled={itemActionsDisabled}
                         className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
                       >
                         {isRenaming ? "変更中..." : "名前変更"}
@@ -2021,12 +2281,15 @@ export default function Player() {
                       <button
                         type="button"
                         onClick={() => void deleteSavedItemById(item.id)}
-                        disabled={!!loadingSavedItemId || !!deletingSavedItemId || !!renamingSavedItemId}
+                        disabled={itemActionsDisabled || isActive}
                         className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
                       >
-                        {isDeleting ? "削除中..." : "削除"}
+                        {isDeleting ? "削除中..." : isActive ? "読込中は削除不可" : "削除"}
                       </button>
                     </div>
+                    {isAssigning && (
+                      <div className="text-xs font-semibold text-slate-500">フォルダ移動中...</div>
+                    )}
                   </div>
                 );
               })}
@@ -2078,7 +2341,7 @@ export default function Player() {
               <video
                 ref={videoRef}
                 preload="auto"
-                controls={mediaReadyForPlayback}
+                controls={mediaReadyForPlayback && !screenLocked}
                 playsInline
                 controlsList="nofullscreen noremoteplayback"
                 disablePictureInPicture
@@ -2089,7 +2352,7 @@ export default function Player() {
                   height: isPlayerFullscreen ? "100%" : "auto",
                   background: "#000",
                   objectFit: "contain",
-                  cursor: localSourceReady ? "pointer" : "default",
+                  cursor: localSourceReady && !screenLocked ? "pointer" : "default",
                 }}
                 onSeeking={onVideoSeeking}
                 onSeeked={onVideoSeeked}
@@ -2108,31 +2371,33 @@ export default function Player() {
 
               {isPlayerFullscreen && (
                 <>
-                  <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-2 p-1">
-                    <div className="pointer-events-auto rounded-full bg-black/60 px-3 py-1 text-xs font-medium text-white/90 backdrop-blur">
-                      速度 {playbackRate.toFixed(2)}x / オフセット {offsetSec.toFixed(3)} 秒
+                  {!screenLocked && (
+                    <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-2 p-1">
+                      <div className="pointer-events-auto rounded-full bg-black/60 px-3 py-1 text-xs font-medium text-white/90 backdrop-blur">
+                        速度 {playbackRate.toFixed(2)}x / オフセット {offsetSec.toFixed(3)} 秒
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setFullscreenControlsOpen((current) => !current)}
+                          className="pointer-events-auto rounded-full bg-black/60 px-3 py-2 text-xs font-semibold text-white backdrop-blur"
+                        >
+                          {fullscreenControlsOpen ? "操作を隠す" : "操作を表示"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void exitPlayerFullscreen()}
+                          className="pointer-events-auto rounded-full bg-white px-3 py-2 text-xs font-semibold text-slate-900"
+                        >
+                          閉じる
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setFullscreenControlsOpen((current) => !current)}
-                        className="pointer-events-auto rounded-full bg-black/60 px-3 py-2 text-xs font-semibold text-white backdrop-blur"
-                      >
-                        {fullscreenControlsOpen ? "操作を隠す" : "操作を表示"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void exitPlayerFullscreen()}
-                        className="pointer-events-auto rounded-full bg-white px-3 py-2 text-xs font-semibold text-slate-900"
-                      >
-                        閉じる
-                      </button>
-                    </div>
-                  </div>
+                  )}
 
                   <div
                     className={`pointer-events-none absolute inset-x-0 bottom-0 top-12 z-20 px-0.5 pb-0.5 transition duration-200 ${
-                      fullscreenControlsOpen
+                      fullscreenControlsOpen && !screenLocked
                         ? "translate-y-0 opacity-100"
                         : "translate-y-4 opacity-0"
                     }`}
@@ -2236,16 +2501,18 @@ export default function Player() {
                             type="button"
                             onClick={() => void togglePlayback()}
                             disabled={localControlsDisabled}
-                            className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 disabled:opacity-50"
+                            className="inline-flex items-center justify-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 disabled:opacity-50"
                           >
+                            <FullscreenButtonIcon src={playing ? "/stop.svg" : "/start.svg"} />
                             {playing ? "一時停止" : "再生"}
                           </button>
                           <button
                             type="button"
                             onClick={saveBookmarkAtCurrentTime}
                             disabled={localControlsDisabled}
-                            className="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-100 disabled:opacity-50"
+                            className="inline-flex items-center justify-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-100 disabled:opacity-50"
                           >
+                            <FullscreenButtonIcon src="/bookmark.svg" />
                             保存
                           </button>
                           <div className="grid grid-cols-2 gap-2">
@@ -2284,14 +2551,44 @@ export default function Player() {
                               +10
                             </button>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setScreenLocked(true);
+                              setFullscreenControlsOpen(false);
+                            }}
+                            disabled={localControlsDisabled}
+                            className="rounded-full border border-white/15 bg-white/5 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                          >
+                            画面ロック
+                          </button>
                         </div>
 
                       </div>
                     </div>
                   </div>
+                  {screenLocked && (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 top-12 z-30 px-0.5 pb-0.5">
+                      <div className="flex h-full items-end justify-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScreenLocked(false);
+                            setFullscreenControlsOpen(true);
+                          }}
+                          className="pointer-events-auto mb-3 mr-3 rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 shadow-2xl"
+                        >
+                          画面ロック解除
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </div>
+            {localSourceReady && !isPlayerFullscreen && (
+              <AudioWaveform active={playing && mediaReadyForPlayback} />
+            )}
             <audio
               ref={audioRef}
               preload="auto"
@@ -2384,6 +2681,14 @@ export default function Player() {
                 <span className="min-w-20 text-right font-semibold">
                   {playbackRate.toFixed(2)}x
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setPlaybackRate(1)}
+                  disabled={localControlsDisabled}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700 disabled:opacity-60"
+                >
+                  リセット
+                </button>
               </div>
 
               <div style={{ display: "grid", gap: 6 }}>
@@ -2425,6 +2730,20 @@ export default function Player() {
                   <span className="min-w-24 text-right font-semibold">
                     {offsetSec.toFixed(3)} 秒
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      offsetDraggingRef.current = false;
+                      setOffsetSec(0);
+                      requestAnimationFrame(() => {
+                        syncDetachedAudioToVideo();
+                      });
+                    }}
+                    disabled={localControlsDisabled}
+                    className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700 disabled:opacity-60"
+                  >
+                    リセット
+                  </button>
                 </div>
                 {sourceOrigin === "youtube" && (
                   <p className="text-xs text-slate-500">
@@ -2704,6 +3023,71 @@ function ModeButton({
   );
 }
 
+function SavedFolderButton({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+        active
+          ? "border-slate-900 bg-slate-900 text-white"
+          : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function FullscreenButtonIcon({ src }: { src: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="h-4 w-4 shrink-0"
+      style={{
+        backgroundColor: "currentColor",
+        mask: `url(${src}) center / contain no-repeat`,
+        WebkitMask: `url(${src}) center / contain no-repeat`,
+      }}
+    />
+  );
+}
+
+function AudioWaveform({ active }: { active: boolean }) {
+  const bars = Array.from({ length: 64 }, (_, index) => {
+    const height = 10 + Math.round(Math.abs(Math.sin(index * 0.58)) * 26);
+    return { height, delay: index * 28 };
+  });
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-950 px-3 py-3">
+      <div className="flex h-12 items-center gap-1 overflow-hidden">
+        {bars.map((bar, index) => (
+          <span
+            key={index}
+            className={`w-1 shrink-0 rounded-full bg-cyan-300/80 ${
+              active ? "animate-pulse" : "opacity-45"
+            }`}
+            style={{
+              height: bar.height,
+              animationDelay: `${bar.delay}ms`,
+              animationDuration: "900ms",
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
 }
@@ -2782,8 +3166,40 @@ function upsertSavedItem(current: SavedMediaItem[], nextItem: SavedMediaItem) {
 
 function sortSavedItems(items: SavedMediaItem[]) {
   return [...items].sort(
-    (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+    (left, right) => getSavedItemSortOrder(right) - getSavedItemSortOrder(left)
   );
+}
+
+function sortSavedFolders(folders: SavedMediaFolder[]) {
+  return [...folders].sort(
+    (left, right) => getSavedFolderSortOrder(right) - getSavedFolderSortOrder(left)
+  );
+}
+
+function getSavedItemSortOrder(item: SavedMediaItem) {
+  if (Number.isFinite(item.sortOrder)) {
+    return item.sortOrder;
+  }
+
+  const createdAt = Date.parse(item.createdAt);
+  return Number.isFinite(createdAt) ? createdAt : 0;
+}
+
+function getSavedFolderSortOrder(folder: SavedMediaFolder) {
+  if (Number.isFinite(folder.sortOrder)) {
+    return folder.sortOrder;
+  }
+
+  const createdAt = Date.parse(folder.createdAt);
+  return Number.isFinite(createdAt) ? createdAt : 0;
+}
+
+function getSavedFolderLabel(folders: SavedMediaFolder[], folderId: string | null) {
+  if (!folderId) {
+    return "未分類";
+  }
+
+  return folders.find((folder) => folder.id === folderId)?.name ?? "不明なフォルダ";
 }
 
 function formatSavedItemStorage(item: SavedMediaItem) {
@@ -2867,20 +3283,43 @@ function isPlayInterruptedError(err: unknown) {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
-function isMediaReadyForPlayback(media: HTMLMediaElement | null) {
-  return Boolean(media && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA);
+function isMediaReadyForPlayback(media: HTMLMediaElement | null, minimumReadyState = 3) {
+  return Boolean(media && media.readyState >= minimumReadyState);
 }
 
 function waitForPlayableMedia(
   media: HTMLMediaElement,
   tokenRef: { current: number },
-  token: number
+  token: number,
+  options?: {
+    minimumReadyState?: number;
+    fallbackReadyState?: number;
+    timeoutMs?: number;
+  }
 ) {
-  if (isMediaReadyForPlayback(media)) {
+  const minimumReadyState = options?.minimumReadyState ?? 3;
+  const fallbackReadyState = options?.fallbackReadyState ?? minimumReadyState;
+  const timeoutMs = options?.timeoutMs ?? 4_000;
+
+  if (isMediaReadyForPlayback(media, minimumReadyState)) {
     return Promise.resolve();
   }
 
   return new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      if (token !== tokenRef.current) {
+        finish(() => reject(new Error("stale media load wait")));
+        return;
+      }
+
+      if (isMediaReadyForPlayback(media, fallbackReadyState)) {
+        finish(resolve);
+        return;
+      }
+
+      finish(() => reject(new Error("media load timed out")));
+    }, timeoutMs);
+
     const finish = (callback: () => void) => {
       cleanup();
       callback();
@@ -2892,7 +3331,7 @@ function waitForPlayableMedia(
         return;
       }
 
-      if (isMediaReadyForPlayback(media)) {
+      if (isMediaReadyForPlayback(media, minimumReadyState)) {
         finish(resolve);
       }
     };
@@ -2902,9 +3341,11 @@ function waitForPlayableMedia(
     };
 
     const cleanup = () => {
+      window.clearTimeout(timeoutId);
       media.removeEventListener("canplay", handleReady);
       media.removeEventListener("canplaythrough", handleReady);
       media.removeEventListener("loadeddata", handleReady);
+      media.removeEventListener("loadedmetadata", handleReady);
       media.removeEventListener("error", handleError);
       media.removeEventListener("emptied", handleError);
     };
@@ -2912,6 +3353,7 @@ function waitForPlayableMedia(
     media.addEventListener("canplay", handleReady);
     media.addEventListener("canplaythrough", handleReady);
     media.addEventListener("loadeddata", handleReady);
+    media.addEventListener("loadedmetadata", handleReady);
     media.addEventListener("error", handleError);
     media.addEventListener("emptied", handleError);
 

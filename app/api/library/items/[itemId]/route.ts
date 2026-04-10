@@ -5,6 +5,7 @@ import { libraryItems } from "@/app/lib/db/schema";
 import { AuthError, requireCurrentUser } from "@/app/lib/auth";
 import {
   deleteLibraryItem,
+  findLibraryFolder,
   findLibraryItem,
   parseBookmarksInput,
   parseOptionalNumberInput,
@@ -16,10 +17,12 @@ export const runtime = "nodejs";
 
 type UpdateBody = {
   title?: string;
-  offsetSec?: number;
+  offsetSec?: number | string;
   trimStartSec?: number | null;
   trimEndSec?: number | null;
   bookmarks?: string | null;
+  folderId?: string | null;
+  sortOrder?: number | string;
 };
 
 export async function PATCH(
@@ -64,11 +67,20 @@ export async function PATCH(
       body?.trimStartSec === undefined ? existing.trimStartSec : body.trimStartSec;
     const trimEndSec =
       body?.trimEndSec === undefined ? existing.trimEndSec : body.trimEndSec;
+    const folderId = await resolveFolderIdUpdate(user.id, existing.folderId, body);
+    const sortOrder =
+      typeof body?.sortOrder === "number"
+        ? body.sortOrder
+        : parseOptionalNumberInput(
+            typeof body?.sortOrder === "string" ? body.sortOrder : null
+          ) ?? existing.sortOrder;
 
     const [updated] = await db
       .update(libraryItems)
       .set({
         title,
+        folderId,
+        sortOrder,
         offsetSec,
         playbackRate: 1,
         trimStartSec,
@@ -115,6 +127,28 @@ async function safeReadJson(request: NextRequest) {
   } catch {
     return null;
   }
+}
+
+async function resolveFolderIdUpdate(
+  userId: string,
+  currentFolderId: string | null,
+  body: UpdateBody | null
+) {
+  if (!Object.prototype.hasOwnProperty.call(body ?? {}, "folderId")) {
+    return currentFolderId;
+  }
+
+  const nextFolderId = body?.folderId?.trim() || null;
+  if (!nextFolderId) {
+    return null;
+  }
+
+  const folder = await findLibraryFolder({ userId, folderId: nextFolderId });
+  if (!folder) {
+    throw new Error("フォルダが見つかりません。");
+  }
+
+  return nextFolderId;
 }
 
 function createErrorResponse(error: unknown) {

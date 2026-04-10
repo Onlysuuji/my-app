@@ -4,6 +4,8 @@ import { libraryItems } from "@/app/lib/db/schema";
 import { AuthError, requireCurrentUser } from "@/app/lib/auth";
 import {
   buildVirtualYouTubeStoredFileName,
+  findLibraryFolder,
+  listLibraryFolders,
   listLibraryItems,
   parseBookmarksInput,
   parseOptionalNumberInput,
@@ -24,13 +26,17 @@ type LibraryCreateBody = {
   trimStartSec?: number | null;
   trimEndSec?: number | null;
   bookmarks?: string | null;
+  folderId?: string | null;
 };
 
 export async function GET() {
   try {
     const user = await requireCurrentUser();
-    const items = await listLibraryItems(user.id);
-    return NextResponse.json({ items });
+    const [items, folders] = await Promise.all([
+      listLibraryItems(user.id),
+      listLibraryFolders(user.id),
+    ]);
+    return NextResponse.json({ items, folders });
   } catch (error) {
     return createErrorResponse(error);
   }
@@ -62,10 +68,13 @@ export async function POST(request: NextRequest) {
       throw new Error("保存できるのは YouTube URL のみです。");
     }
 
+    const folderId = await normalizeOwnedFolderId(user.id, body?.folderId ?? null);
     const title = normalizeTitle(body?.title, youtubeVideoId);
     const values: typeof libraryItems.$inferInsert = {
       userId: user.id,
+      folderId,
       title,
+      sortOrder: Date.now(),
       sourceKind: "youtube",
       sourceOrigin: "youtube",
       sourceUrl,
@@ -134,6 +143,20 @@ function normalizeNumberInput(value: number | string | undefined, fallback: numb
   }
 
   return parseOptionalNumberInput(typeof value === "string" ? value : null) ?? fallback;
+}
+
+async function normalizeOwnedFolderId(userId: string, folderId: string | null) {
+  const normalizedFolderId = folderId?.trim() || null;
+  if (!normalizedFolderId) {
+    return null;
+  }
+
+  const folder = await findLibraryFolder({ userId, folderId: normalizedFolderId });
+  if (!folder) {
+    throw new Error("フォルダが見つかりません。");
+  }
+
+  return normalizedFolderId;
 }
 
 function createErrorResponse(error: unknown) {

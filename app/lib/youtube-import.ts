@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+﻿import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { mkdirSync, promises as fs, writeFileSync } from "fs";
 import path from "path";
@@ -73,6 +73,7 @@ export async function importYouTubeVideo(options: {
     const ytDlpPath = await resolveExecutablePath("YT_DLP_PATH", "yt-dlp");
     const ffmpegPath = await resolveExecutablePath("FFMPEG_PATH", "ffmpeg");
     const cookieAuthStrategies = await getYtDlpCookieStrategies();
+    const ytDlpUserAgentArgs = await getYtDlpUserAgentArgs();
     const maxFilesizeMb =
       parsePositiveInteger(process.env.YT_DLP_MAX_FILESIZE_MB) ?? DEFAULT_MAX_FILESIZE_MB;
     const timeoutMs = parsePositiveInteger(process.env.YT_DLP_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
@@ -89,6 +90,7 @@ export async function importYouTubeVideo(options: {
         outputTemplate,
         timeoutMs,
         url: options.url,
+        ytDlpUserAgentArgs,
         ytDlpPath,
       });
       const { size } = await fs.stat(importedPath);
@@ -115,6 +117,7 @@ async function downloadVideoWithRetry(options: {
   outputTemplate: string;
   timeoutMs: number;
   url: string;
+  ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }) {
   try {
@@ -152,6 +155,7 @@ async function downloadVideoWithRetry(options: {
           strategyLabel: strategy.label,
           timeoutMs: options.timeoutMs,
           url: options.url,
+          ytDlpUserAgentArgs: options.ytDlpUserAgentArgs,
           ytDlpPath: options.ytDlpPath,
         });
 
@@ -177,6 +181,7 @@ async function downloadVideoWithSelectors(options: {
   outputTemplate: string;
   timeoutMs: number;
   url: string;
+  ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }) {
   let lastError: Error | null = null;
@@ -190,6 +195,7 @@ async function downloadVideoWithSelectors(options: {
         [
           "--no-playlist",
           "--no-warnings",
+          ...options.ytDlpUserAgentArgs,
           ...options.cookieArgs,
           "--print",
           "after_move:filepath",
@@ -525,16 +531,16 @@ async function probeMediaStreams(importedPath: string, ffmpegPath: string) {
     });
 
     child.on("close", (code) => {
-      const detail = `${stdout}\n${stderr}`.trim();
+      const detail = [stdout, stderr].join("\n").trim();
       if (!detail && code !== 0) {
-        finishReject(new Error(`exit code ${code}`));
+        finishReject(new Error("exit code " + String(code)));
         return;
       }
       finishResolve({ stdout, stderr });
     });
   });
 
-  const detail = `${result.stdout}\n${result.stderr}`;
+  const detail = [result.stdout, result.stderr].join("\n");
   return {
     hasAudio: /Audio:/i.test(detail),
     hasVideo: /Video:/i.test(detail),
@@ -546,16 +552,24 @@ async function diagnoseCookieFormatFailure(options: {
   strategyLabel: string;
   timeoutMs: number;
   url: string;
+  ytDlpUserAgentArgs: string[];
   ytDlpPath: string;
 }) {
   try {
     const result = await runCommand(
       options.ytDlpPath,
-      ["--no-playlist", "--no-warnings", ...options.cookieArgs, "--list-formats", options.url],
+      [
+        "--no-playlist",
+        "--no-warnings",
+        ...options.ytDlpUserAgentArgs,
+        ...options.cookieArgs,
+        "--list-formats",
+        options.url,
+      ],
       REPO_ROOT,
       Math.min(options.timeoutMs, 60_000)
     );
-    const detail = `${result.stdout}\n${result.stderr}`;
+    const detail = [result.stdout, result.stderr].join("\n");
 
     if (hasOnlyStoryboardFormats(detail)) {
       return buildCookieFormatErrorMessage(options.strategyLabel);
@@ -623,6 +637,17 @@ function parsePositiveInteger(value: string | undefined) {
   if (!value) return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function getYtDlpUserAgentArgs() {
+  const configuredValue =
+    process.env.YT_DLP_USER_AGENT?.trim() || (await readEnvFileValue("YT_DLP_USER_AGENT"))?.trim();
+
+  if (!configuredValue) {
+    return [];
+  }
+
+  return ["--user-agent", configuredValue];
 }
 
 async function resolveExecutablePath(envName: string, fallbackCommand: string) {
@@ -724,13 +749,6 @@ function getYtDlpCookieStrategies() {
   const strategies: CookieAuthStrategy[] = [];
   const cookiesPath = resolveConfiguredCookiesPath();
   const cookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim();
-
-  if (cookiesFromBrowser && process.env.NODE_ENV === "production") {
-    throw new YouTubeImportError(
-      "Production では `YT_DLP_COOKIES_FROM_BROWSER` を使えません。`YT_DLP_COOKIES_PATH` を使ってください。",
-      { code: "IMPORT_CONFIG", status: 500 }
-    );
-  }
 
   if (process.env.NODE_ENV !== "production") {
     for (const browser of getLocalBrowserCookieFallbacks(cookiesFromBrowser)) {
@@ -856,13 +874,7 @@ function getYtDlpCookieArgs() {
   }
 
   const cookiesFromBrowser = process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim();
-  if (cookiesFromBrowser) {
-    if (process.env.NODE_ENV === "production") {
-      throw new YouTubeImportError(
-        "公開環境では `YT_DLP_COOKIES_FROM_BROWSER` は使えません。`YT_DLP_COOKIES_PATH` を使ってください。",
-        { code: "IMPORT_CONFIG", status: 500 }
-      );
-    }
+  if (cookiesFromBrowser && process.env.NODE_ENV !== "production") {
     return ["--cookies-from-browser", cookiesFromBrowser];
   }
 
@@ -893,3 +905,4 @@ function formatYtDlpError(detail: string) {
 
   return `yt-dlp の実行に失敗しました: ${detail}`;
 }
+

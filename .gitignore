@@ -25,6 +25,7 @@
 *.pem
 .tmp/
 .data/
+/secrets/*.txt
 
 # debug
 npm-debug.log*

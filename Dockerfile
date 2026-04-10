@@ -17,14 +17,19 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
+ENV DENO_INSTALL=/usr/local
+ENV PATH=/usr/local/bin:${PATH}
 ENV YT_DLP_PATH=yt-dlp
 ENV FFMPEG_PATH=ffmpeg
 ENV YOUTUBE_IMPORT_TMP_ROOT=/tmp/youtube-imports
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates \
+  && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates curl unzip \
+  && curl -fsSL https://deno.land/install.sh | sh -s -- -y \
   && pip3 install --no-cache-dir --break-system-packages yt-dlp \
-  && apt-get purge -y python3-pip \
+  && deno --version \
+  && yt-dlp --version \
+  && apt-get purge -y python3-pip curl unzip \
   && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 

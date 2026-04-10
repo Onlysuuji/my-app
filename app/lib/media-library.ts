@@ -2,9 +2,13 @@ import "server-only";
 
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/app/lib/db";
-import { libraryItems } from "@/app/lib/db/schema";
+import { libraryFolders, libraryItems } from "@/app/lib/db/schema";
 import { deleteMediaFile } from "@/app/lib/media-storage";
-import type { PlaybackBookmark, SavedMediaItem } from "@/app/lib/account-types";
+import type {
+  PlaybackBookmark,
+  SavedMediaFolder,
+  SavedMediaItem,
+} from "@/app/lib/account-types";
 
 const VIRTUAL_YOUTUBE_STORED_FILE_PREFIX = "youtube:";
 
@@ -12,10 +16,35 @@ export async function listLibraryItems(userId: string) {
   const db = getDb();
   const rows = await db.query.libraryItems.findMany({
     where: eq(libraryItems.userId, userId),
-    orderBy: [desc(libraryItems.updatedAt), desc(libraryItems.createdAt)],
+    orderBy: [desc(libraryItems.sortOrder), desc(libraryItems.createdAt)],
   });
 
   return rows.map(serializeLibraryItem);
+}
+
+export async function listLibraryFolders(userId: string) {
+  const db = getDb();
+  const rows = await db.query.libraryFolders.findMany({
+    where: eq(libraryFolders.userId, userId),
+    orderBy: [desc(libraryFolders.sortOrder), desc(libraryFolders.createdAt)],
+  });
+
+  return rows.map(serializeLibraryFolder);
+}
+
+export async function createLibraryFolder(options: { userId: string; name: string }) {
+  const db = getDb();
+  const normalizedName = normalizeFolderName(options.name);
+  const [folder] = await db
+    .insert(libraryFolders)
+    .values({
+      userId: options.userId,
+      name: normalizedName,
+      sortOrder: Date.now(),
+    })
+    .returning();
+
+  return serializeLibraryFolder(folder);
 }
 
 export async function findLibraryItem(options: { userId: string; itemId: string }) {
@@ -23,6 +52,16 @@ export async function findLibraryItem(options: { userId: string; itemId: string 
   const row = await db.query.libraryItems.findFirst({
     where: (table, { and, eq }) =>
       and(eq(table.id, options.itemId), eq(table.userId, options.userId)),
+  });
+
+  return row ?? null;
+}
+
+export async function findLibraryFolder(options: { userId: string; folderId: string }) {
+  const db = getDb();
+  const row = await db.query.libraryFolders.findFirst({
+    where: (table, { and, eq }) =>
+      and(eq(table.id, options.folderId), eq(table.userId, options.userId)),
   });
 
   return row ?? null;
@@ -51,6 +90,8 @@ export function serializeLibraryItem(
   return {
     id: item.id,
     title: item.title,
+    folderId: item.folderId,
+    sortOrder: item.sortOrder,
     sourceKind: item.sourceKind,
     sourceOrigin: item.sourceOrigin,
     sourceUrl: item.sourceUrl,
@@ -66,6 +107,27 @@ export function serializeLibraryItem(
     createdAt: item.createdAt.toISOString(),
     updatedAt: item.updatedAt.toISOString(),
   };
+}
+
+export function serializeLibraryFolder(
+  folder: typeof libraryFolders.$inferSelect
+): SavedMediaFolder {
+  return {
+    id: folder.id,
+    name: folder.name,
+    sortOrder: folder.sortOrder,
+    createdAt: folder.createdAt.toISOString(),
+    updatedAt: folder.updatedAt.toISOString(),
+  };
+}
+
+export function normalizeFolderName(value: unknown) {
+  const name = typeof value === "string" ? value.trim() : "";
+  if (!name) {
+    throw new Error("フォルダ名を入力してください。");
+  }
+
+  return name.slice(0, 80);
 }
 
 export function parseBookmarksInput(value: string | null): PlaybackBookmark[] {

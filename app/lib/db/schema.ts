@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -42,6 +43,26 @@ export type SavedBookmark = {
   timeSec: number;
 };
 
+export const libraryFolders = pgTable(
+  "library_folders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    sortOrder: doublePrecision("sort_order")
+      .default(sql`extract(epoch from now())`)
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("library_folders_user_id_idx").on(table.userId),
+    index("library_folders_sort_order_idx").on(table.sortOrder),
+  ]
+);
+
 export const libraryItems = pgTable(
   "library_items",
   {
@@ -49,7 +70,11 @@ export const libraryItems = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    folderId: uuid("folder_id").references(() => libraryFolders.id, { onDelete: "set null" }),
     title: text("title").notNull(),
+    sortOrder: doublePrecision("sort_order")
+      .default(sql`extract(epoch from now())`)
+      .notNull(),
     sourceKind: mediaSourceKindEnum("source_kind").notNull(),
     sourceOrigin: mediaSourceOriginEnum("source_origin").notNull(),
     sourceUrl: text("source_url"),
@@ -71,6 +96,8 @@ export const libraryItems = pgTable(
   },
   (table) => [
     index("library_items_user_id_idx").on(table.userId),
+    index("library_items_folder_id_idx").on(table.folderId),
+    index("library_items_sort_order_idx").on(table.sortOrder),
     index("library_items_updated_at_idx").on(table.updatedAt),
   ]
 );

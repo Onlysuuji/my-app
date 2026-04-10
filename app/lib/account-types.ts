@@ -9,9 +9,19 @@ export type SessionUser = {
   displayName: string | null;
 };
 
+export type SavedMediaFolder = {
+  id: string;
+  name: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type SavedMediaItem = {
   id: string;
   title: string;
+  folderId: string | null;
+  sortOrder: number;
   sourceKind: "upload" | "youtube";
   sourceOrigin: "local" | "youtube";
   sourceUrl: string | null;
