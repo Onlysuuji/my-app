@@ -840,12 +840,12 @@ function shouldRequireCookies() {
     return /^(1|true|yes|on)$/i.test(configured);
   }
 
-  return process.env.NODE_ENV === "production";
+  return true;
 }
 
 function buildMissingCookiesError() {
   return new YouTubeImportError(
-    "本番環境では YouTube 取り込みに cookies が必須です。`YT_DLP_COOKIES_CONTENT_B64` を設定してください。",
+    "YouTube 取り込みには cookies が必須です。`YT_DLP_COOKIES_CONTENT_B64` を設定してください。",
     { code: "IMPORT_CONFIG", status: 500 }
   );
 }
