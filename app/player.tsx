@@ -2586,9 +2586,6 @@ export default function Player() {
                 </>
               )}
             </div>
-            {localSourceReady && !isPlayerFullscreen && (
-              <AudioWaveform active={playing && mediaReadyForPlayback} />
-            )}
             <audio
               ref={audioRef}
               preload="auto"
@@ -3058,33 +3055,6 @@ function FullscreenButtonIcon({ src }: { src: string }) {
         WebkitMask: `url(${src}) center / contain no-repeat`,
       }}
     />
-  );
-}
-
-function AudioWaveform({ active }: { active: boolean }) {
-  const bars = Array.from({ length: 64 }, (_, index) => {
-    const height = 10 + Math.round(Math.abs(Math.sin(index * 0.58)) * 26);
-    return { height, delay: index * 28 };
-  });
-
-  return (
-    <div className="rounded-xl border border-slate-200 bg-slate-950 px-3 py-3">
-      <div className="flex h-12 items-center gap-1 overflow-hidden">
-        {bars.map((bar, index) => (
-          <span
-            key={index}
-            className={`w-1 shrink-0 rounded-full bg-cyan-300/80 ${
-              active ? "animate-pulse" : "opacity-45"
-            }`}
-            style={{
-              height: bar.height,
-              animationDelay: `${bar.delay}ms`,
-              animationDuration: "900ms",
-            }}
-          />
-        ))}
-      </div>
-    </div>
   );
 }
 

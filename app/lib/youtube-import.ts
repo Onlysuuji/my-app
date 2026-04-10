@@ -770,27 +770,21 @@ function getYtDlpCookieStrategies() {
 }
 
 function resolveConfiguredCookiesPath() {
-  const configuredPath =
-    process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim();
-  if (configuredPath) {
-    return configuredPath;
-  }
-
   const inlineContentBase64 = process.env.YT_DLP_COOKIES_CONTENT_B64?.trim();
   const inlineContent = process.env.YT_DLP_COOKIES_CONTENT;
-  if (!inlineContentBase64 && !inlineContent?.trim()) {
-    return null;
-  }
+  if (inlineContentBase64 || inlineContent?.trim()) {
+    if (generatedCookiesFilePath !== undefined) {
+      return generatedCookiesFilePath;
+    }
 
-  if (generatedCookiesFilePath !== undefined) {
+    generatedCookiesFilePath = materializeInlineCookiesFile({
+      inlineContent,
+      inlineContentBase64,
+    });
     return generatedCookiesFilePath;
   }
 
-  generatedCookiesFilePath = materializeInlineCookiesFile({
-    inlineContent,
-    inlineContentBase64,
-  });
-  return generatedCookiesFilePath;
+  return process.env.YT_DLP_COOKIES_PATH?.trim() || process.env.YT_DLP_COOKIES_FILE?.trim() || null;
 }
 
 function materializeInlineCookiesFile(options: {
